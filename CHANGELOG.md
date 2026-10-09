@@ -6,6 +6,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
+### Added
+
+- Wheels for the free-threaded CPython 3.14 (`cp314t`) on every platform, next to the `abi3` ones (#3). The
+  native module declares that it does not need the GIL, so importing it keeps the GIL off.
+- CI runs the tests on CPython 3.11, 3.12, 3.13, 3.14, 3.14t and on the 3.15 and 3.15t pre-releases; every
+  wheel is tested on its own runner, the `abi3` one on 3.11, 3.14 and 3.15.
+
 ## [0.1.0] - 2026-10-09
 
 ### Added
@@ -17,5 +26,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/troyan-dy/fastotel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/troyan-dy/fastotel/releases/tag/v0.1.0
