@@ -24,7 +24,7 @@ jobs:
           - { name: windows-arm64, runner: windows-11-arm, target: aarch64, test: true }
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Choose the interpreters
         id: interpreters
         shell: bash
