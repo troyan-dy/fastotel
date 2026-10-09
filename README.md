@@ -25,7 +25,17 @@ and export run on a thread that never takes the GIL.
 pip install fastotel
 ```
 
-Wheels are built for CPython 3.11 and newer on Linux (glibc and musl), macOS and Windows, x86_64 and arm64.
+Wheels are built for Linux (glibc and musl), macOS and Windows, x86_64 and arm64:
+
+| Python | Wheel | Tested in CI |
+| --- | --- | --- |
+| CPython 3.11, 3.12, 3.13, 3.14 | one `abi3` wheel per platform, which also covers later versions | yes |
+| CPython 3.14t, free-threaded | `cp314t`; the GIL stays off after import | yes |
+| CPython 3.15 (pre-release) | the `abi3` wheel | yes |
+| CPython 3.15t (pre-release) | none yet: builds from the sdist; a wheel ships with 3.15.0 | yes, from source |
+
+CPython 3.10 reached end of life on 2026-10-01 and is not supported. Free-threaded 3.13t is not supported
+either: it was experimental, and PyO3 builds free-threaded extensions from 3.14 on.
 
 ## Development
 

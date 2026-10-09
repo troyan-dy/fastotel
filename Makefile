@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-PY_VERSIONS := 3.11 3.12 3.13 3.14
+PY_VERSIONS := 3.11 3.12 3.13 3.14 3.14t 3.15 3.15t
 # The build script of PyO3 checks the interpreter against abi3-py311; the system python3 may be older
 export PYO3_PYTHON ?= $(CURDIR)/.venv/bin/python
 
@@ -31,7 +31,7 @@ test: ## Run tests
 	uv run pytest
 
 .PHONY: test-all
-test-all: ## Run tests on every supported Python version
+test-all: ## Run tests on every supported Python version, free-threaded and pre-release ones too
 	@for v in $(PY_VERSIONS); do \
 		echo "==> Python $$v"; \
 		uv run --isolated --python $$v pytest || exit 1; \

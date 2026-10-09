@@ -1,7 +1,7 @@
 name: Wheels
 
-# Builds the sdist and a wheel per platform, then runs the tests against each wheel on the oldest and the newest
-# supported Python. CI calls it on every pull request so a release never meets a broken build first; Release
+# Builds the sdist and, per platform, an abi3 wheel for every CPython from 3.11 on plus a cp314t wheel for the
+# free-threaded 3.14, which the stable ABI does not cover. Each wheel is tested on its own runner. CI calls it on every pull request so a release never meets a broken build first; Release
 # calls it to get what it publishes.
 on:
   workflow_call:
@@ -24,25 +24,35 @@ jobs:
           - { name: windows-arm64, runner: windows-11-arm, target: aarch64, test: true }
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        if: runner.os != 'Linux'
-        with:
-          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+      - name: Choose the interpreters
+        id: interpreters
+        shell: bash
+        run: |
+          # The manylinux and musllinux containers bring every CPython; elsewhere uv installs them
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "args=python3.11 python3.14t" >> "$GITHUB_OUTPUT"
+          else
+            uv python install 3.11 3.14t
+            echo "args=$(uv python find 3.11) $(uv python find 3.14t)" >> "$GITHUB_OUTPUT"
+          fi
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --locked --out dist
-      - uses: astral-sh/setup-uv@v6
-        if: matrix.platform.test
-      - name: Test the wheel
+          args: --release --locked --out dist --interpreter ${{ steps.interpreters.outputs.args }}
+      - name: Test the wheels
         if: matrix.platform.test
         shell: bash
         run: |
-          for python in 3.11 3.14; do
-            uv run --isolated --no-project --python "$python" --with pytest --with dist/*.whl \
+          check() {
+            uv run --isolated --no-project --python "$1" --with pytest --with "$(ls dist/*-"$2"-*.whl)" \
               pytest -p no:cacheprovider tests
-          done
+          }
+          check 3.11 abi3
+          check 3.14 abi3
+          check 3.15 abi3  # a pre-release: the abi3 wheel has to keep working on it
+          check 3.14t cp314t
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.platform.name }}
