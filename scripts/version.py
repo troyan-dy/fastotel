@@ -77,10 +77,15 @@ def main(argv: list[str]) -> int:  # pragma: no cover - exercised by CI
 
     match argv:
         case ["check", base]:
-            shown = _git("show", f"{base}:pyproject.toml")
-            if shown.returncode != 0:
-                return _fail([f"cannot read pyproject.toml on {base}: {shown.stderr.strip()}"])
-            errors = problems(version, _version_in(shown.stdout), changelog, tagged=_tagged(version))
+            if _git("cat-file", "-e", f"{base}:pyproject.toml").returncode != 0:
+                # The first release: the base has no package yet
+                base_version = "0.0.0"
+            else:
+                shown = _git("show", f"{base}:pyproject.toml")
+                if shown.returncode != 0:
+                    return _fail([f"cannot read pyproject.toml on {base}: {shown.stderr.strip()}"])
+                base_version = _version_in(shown.stdout)
+            errors = problems(version, base_version, changelog, tagged=_tagged(version))
         case ["unreleased"]:
             errors = []
             if _tagged(version):
