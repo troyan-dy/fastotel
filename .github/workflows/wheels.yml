@@ -13,28 +13,37 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # python: the platform part of a uv interpreter key, for the interpreters installed on the runner. It is
+        # spelled out because uv picks emulated x86_64 builds on Windows arm64, and a bare 3.14 may resolve to an
+        # installed 3.14t.
         platform:
-          - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: auto, test: true }
-          - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: auto, test: true }
-          - { name: musllinux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2, test: false }
-          - { name: musllinux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2, test: false }
-          - { name: macos-x86_64, runner: macos-15-intel, target: x86_64, test: true }
-          - { name: macos-arm64, runner: macos-latest, target: aarch64, test: true }
-          - { name: windows-x64, runner: windows-latest, target: x64, test: true }
-          - { name: windows-arm64, runner: windows-11-arm, target: aarch64, test: true }
+          - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: auto, python: linux-x86_64-gnu }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: auto, python: linux-aarch64-gnu }
+          # The tests would need a musl host; these wheels are only built
+          - { name: musllinux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { name: musllinux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2 }
+          - { name: macos-x86_64, runner: macos-15-intel, target: x86_64, python: macos-x86_64-none }
+          - { name: macos-arm64, runner: macos-latest, target: aarch64, python: macos-aarch64-none }
+          - { name: windows-x64, runner: windows-latest, target: x64, python: windows-x86_64-none }
+          - { name: windows-arm64, runner: windows-11-arm, target: aarch64, python: windows-aarch64-none }
+    env:
+      PLATFORM: ${{ matrix.platform.python }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
-      - name: Choose the interpreters
+      - name: Install the interpreters
+        if: matrix.platform.python
+        shell: bash
+        run: uv python install "cpython-3.11-$PLATFORM" "cpython-3.14-$PLATFORM" "cpython-3.15-$PLATFORM" "cpython-3.14+freethreaded-$PLATFORM"
+      - name: Choose the interpreters to build for
         id: interpreters
         shell: bash
         run: |
-          # The manylinux and musllinux containers bring every CPython; elsewhere uv installs them
+          # The manylinux and musllinux containers bring every CPython; elsewhere the build uses uv's
           if [ "$RUNNER_OS" = Linux ]; then
             echo "args=python3.11 python3.14t" >> "$GITHUB_OUTPUT"
           else
-            uv python install 3.11 3.14t
-            echo "args=$(uv python find 3.11) $(uv python find 3.14t)" >> "$GITHUB_OUTPUT"
+            echo "args=$(uv python find "cpython-3.11-$PLATFORM") $(uv python find "cpython-3.14+freethreaded-$PLATFORM")" >> "$GITHUB_OUTPUT"
           fi
       - uses: PyO3/maturin-action@v1
         with:
@@ -42,21 +51,17 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux }}
           args: --release --locked --out dist --interpreter ${{ steps.interpreters.outputs.args }}
       - name: Test the wheels
-        if: matrix.platform.test
+        if: matrix.platform.python
         shell: bash
         run: |
-          uv python list --only-installed
           check() {
-            uv run --isolated --no-project --python "$1" --with pytest --with "$(ls dist/*-"$2"-*.whl)" \
+            uv run --isolated --no-project --python "cpython-$1-$PLATFORM" --with pytest --with "$(ls dist/*-"$2"-*.whl)" \
               pytest -p no:cacheprovider tests
           }
-          # +gil: with 3.14t installed, a bare 3.14 may resolve to the free-threaded build; uv does not download
-          # for a +gil request, so the interpreters are installed first
-          uv python install 3.11 3.14 3.15 3.14t
           check 3.11 abi3
-          check 3.14+gil abi3
-          check 3.15+gil abi3  # a pre-release: the abi3 wheel has to keep working on it
-          check 3.14t cp314t
+          check 3.14 abi3
+          check 3.15 abi3  # a pre-release: the abi3 wheel has to keep working on it
+          check 3.14+freethreaded cp314t
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.platform.name }}
