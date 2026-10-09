@@ -1,0 +1,69 @@
+name: Release
+
+# Every push to master releases the version in pyproject.toml. The version job of CI makes sure a pull
+# request bumps it; a change that reaches master without a bump fails here. See scripts/version.py.
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # the tags tell which versions are released
+      - uses: astral-sh/setup-uv@v6
+      - id: version
+        name: Check that the version is not released yet
+        run: |
+          version=$(uv run --no-project python scripts/version.py unreleased)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/wheels.yml
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fastotel/
+    permissions:
+      id-token: write  # PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  tag:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Tag the release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "fastotel ${VERSION}"
+          git push origin "v${VERSION}"
+      - name: Publish the release notes from CHANGELOG.md
+        run: |
+          uv run --no-project python scripts/version.py notes > notes.md
+          gh release create "v${VERSION}" --verify-tag --title "fastotel ${VERSION}" --notes-file notes.md
