@@ -1,0 +1,71 @@
+[project]
+name = "fastotel"
+version = "0.1.0"
+description = "A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Dmitriy Troyan" }]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["opentelemetry", "otel", "otlp", "tracing", "observability", "rust", "pyo3"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Rust",
+  "Topic :: System :: Monitoring",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/troyan-dy/fastotel"
+Repository = "https://github.com/troyan-dy/fastotel"
+Issues = "https://github.com/troyan-dy/fastotel/issues"
+Changelog = "https://github.com/troyan-dy/fastotel/blob/master/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+  "maturin>=1.15,<2",
+  "mypy>=1.13",
+  "pytest>=8.3",
+  "ruff>=0.8",
+]
+
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name = "fastotel._fastotel"
+# The agent instructions stay out of the sdist
+exclude = [{ path = "CLAUDE.md", format = "sdist" }, { path = "docs/agents/**/*", format = "sdist" }]
+
+[tool.uv]
+# uv rebuilds the extension when the Rust sources change, not only the Python metadata
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }, { file = "src/**/*.rs" }]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "B", "A", "UP", "S", "RUF"]
+ignore = ["S101"]
+
+[tool.mypy]
+files = ["python", "tests", "scripts"]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
