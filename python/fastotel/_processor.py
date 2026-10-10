@@ -121,7 +121,11 @@ class OTLPSpanProcessor(SpanProcessor):
             max_export_batch_size,
             export_timeout_millis,
         )
-        _processors.add(self)
+        with _exit_lock:
+            _processors.add(self)
+            if _exited:
+                # Created by an exit handler that runs after fastotel's
+                self._native.exiting(_hang_at_exit())
 
     def on_end(self, span: ReadableSpan) -> None:
         self._native.on_end(span)
@@ -145,14 +149,24 @@ class OTLPSpanProcessor(SpanProcessor):
         return self._native.force_flush(timeout_millis)
 
 
-# Every processor alive, for the exit handler
+# Every processor alive, for the exit handler, and whether it has run
 _processors: "weakref.WeakSet[OTLPSpanProcessor]" = weakref.WeakSet()
+_exited = False
+_exit_lock = threading.Lock()
 # The frames of the calls into the native module
 _NATIVE_CALLS = frozenset(
     {OTLPSpanProcessor.on_end.__code__, OTLPSpanProcessor.force_flush.__code__, OTLPSpanProcessor.shutdown.__code__}
 )
-# How long the exit handler waits for other threads to leave the native module
+# How long the exit handler waits for threads running Python code the native module called, and for threads that
+# only have to take the GIL back to leave it
 _EXIT_WAIT_SECONDS = 2.0
+_EXIT_WAIT_DETACHED_SECONDS = 10.0
+
+
+def _hang_at_exit() -> bool:
+    # Before 3.14 a thread back from a wait hangs rather than take the GIL back, as 3.14 hangs daemon threads; a
+    # build without the GIL (3.13t, built from source) gets no protection from it
+    return sys.version_info < (3, 14) and getattr(sys, "_is_gil_enabled", lambda: True)()
 
 
 @atexit.register
@@ -164,41 +178,47 @@ def _at_exit() -> None:
     processors down. From here on, on other threads, `on_end` drops and counts spans without calling into Python,
     and `force_flush` and `shutdown` return False without letting go of the GIL, ending the waits they are in. Before
     3.14 CPython ends a daemon thread that takes the GIL during finalization with `pthread_exit`, which on glibc
-    unwinds its stack and aborts the process when Rust frames are on it, so this also waits until no other thread
-    can take the GIL inside the native module.
+    unwinds its stack and aborts the process when Rust frames are on it, so a thread back from such a wait hangs
+    instead, and this waits until no other thread can take the GIL inside the native module.
     """
-    # Such a thread hangs from 3.14 on, which is harmless; before, a thread back from a wait without the GIL
-    # hangs too, rather than take it back
-    before_3_14 = sys.version_info < (3, 14)
-    for processor in list(_processors):
-        processor._native.exiting(before_3_14)
-    if not before_3_14:
+    global _exited
+    hang = _hang_at_exit()
+    with _exit_lock:
+        _exited = True
+        processors = list(_processors)
+    for processor in processors:
+        processor._native.exiting(hang)
+    if not hang:
         return
-    deadline = time.monotonic() + _EXIT_WAIT_SECONDS
-    while _inside_native_code() and time.monotonic() < deadline:
+    started = time.monotonic()
+    while (inside := _inside_native_code()) is not None:
+        waited = time.monotonic() - started
+        if waited > _EXIT_WAIT_DETACHED_SECONDS or (inside == "python" and waited > _EXIT_WAIT_SECONDS):
+            break
         # Lets those threads take the GIL and leave
         time.sleep(0.001)
 
 
-def _inside_native_code() -> bool:
+def _inside_native_code() -> str | None:
     """
-    Whether another thread can take the GIL inside Rust code: it waits in `force_flush` or `shutdown` without the
-    GIL and is not hanging yet, or runs Python code that the native module called (a span's properties, a log),
-    which shows as a frame above one of the calls into it. Otherwise native code takes no GIL, so a thread whose
-    topmost frame is the call itself is about to enter it, or back from it, and harmless.
+    How another thread can take the GIL inside Rust code, if one can: "detached" when it is back from a wait in
+    `force_flush` or `shutdown` without the GIL and does not hang, "python" when it runs Python code that the native
+    module called (a span's properties, a log), which shows as a frame above one of the calls into it. Otherwise
+    native code takes no GIL, so a thread whose topmost frame is the call itself is about to enter it, or back from
+    it, and harmless.
     """
     if _fastotel.detached():
-        return True
+        return "detached"
     current = threading.get_ident()
     for ident, top in sys._current_frames().items():
         frame = top
         while ident != current and frame is not None:
             if frame.f_code in _NATIVE_CALLS:
                 if frame is not top:
-                    return True
+                    return "python"
                 break
             frame = frame.f_back  # type: ignore[assignment]
-    return False
+    return None
 
 
 def _read(path: str | None) -> bytes | None:

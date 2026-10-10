@@ -14,31 +14,42 @@ from receiver import FakeReceiver
 # Well above what a slow CI runner takes to start Python and import the SDK, well below the waits a hang would cost
 LIMIT = 60
 
-_PRELUDE = """
+_CHECK = """
 import atexit, sys, threading, time
+
+# Appended to by a script's own exit handler, which runs before the provider's
+exit_started = []
 
 @atexit.register
 def _check_daemon_threads_are_out():
     # Registered before fastotel's exit handler, so it runs after it: no thread may be left where finalization
     # would end it inside Rust code; the frames tell where
     from fastotel import _processor
-    if sys.version_info < (3, 14) and _processor._inside_native_code():
+    if sys.version_info < (3, 14) and _processor._inside_native_code() is not None:
         frames = sys._current_frames()
         import traceback
         for ident, frame in frames.items():
             print("THREAD", ident, "".join(traceback.format_stack(frame)), file=sys.stderr)
         print("STILL INSIDE fastotel after its exit handler", file=sys.stderr, flush=True)
+    if exit_started:
+        print(f"EXIT WAITED {time.monotonic() - exit_started[0]}", file=sys.stderr, flush=True)
 
 from opentelemetry.sdk.trace import TracerProvider
+"""
+_IMPORT = """
 from fastotel import OTLPSpanProcessor
 
 endpoint = sys.argv[1]
 """
 
 
-def _start(script: str, endpoint: str) -> subprocess.Popen[str]:
+def _start(script: str, endpoint: str, before_import: str = "") -> subprocess.Popen[str]:
+    """
+    Runs `script` after the prelude; `before_import` runs before fastotel is imported.
+    """
+    source = _CHECK + textwrap.dedent(before_import) + _IMPORT + textwrap.dedent(script)
     return subprocess.Popen(  # noqa: S603 - the test's own interpreter and script
-        [sys.executable, "-X", "faulthandler", "-c", _PRELUDE + textwrap.dedent(script), endpoint],
+        [sys.executable, "-X", "faulthandler", "-c", source, endpoint],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -46,9 +57,9 @@ def _start(script: str, endpoint: str) -> subprocess.Popen[str]:
     )
 
 
-def _exit(process: subprocess.Popen[str], stdin: str = "") -> float:
+def _exit(process: subprocess.Popen[str], stdin: str = "") -> tuple[float, str]:
     """
-    Waits for the process to exit, failing the test after LIMIT seconds; how long it took.
+    Waits for the process to exit, failing the test after LIMIT seconds; how long it took and its stderr.
     """
     started = time.monotonic()
     try:
@@ -62,11 +73,11 @@ def _exit(process: subprocess.Popen[str], stdin: str = "") -> float:
     # Neither a panic nor a crash on the way out, nor an exception ignored by the interpreter
     for sign in ("panicked", "Fatal Python error", "Traceback", "Exception ignored", "STILL INSIDE"):
         assert sign not in stderr, stderr
-    return took
+    return took, stderr
 
 
-def _run(script: str, endpoint: str) -> float:
-    return _exit(_start(script, endpoint))
+def _run(script: str, endpoint: str, before_import: str = "") -> float:
+    return _exit(_start(script, endpoint, before_import))[0]
 
 
 def test_the_providers_shutdown_at_exit_exports_what_is_queued(receiver: FakeReceiver) -> None:
@@ -85,18 +96,24 @@ def test_the_providers_shutdown_at_exit_exports_what_is_queued(receiver: FakeRec
 
 def test_exit_waits_for_a_hung_collector_no_longer_than_the_export_timeout(receiver: FakeReceiver) -> None:
     with receiver.stalled():
-        took = _run(
-            """
-            provider = TracerProvider()
-            # A request would wait 10 minutes for the collector; shutdown waits 1 s
-            processor = OTLPSpanProcessor(endpoint=endpoint, timeout=600, export_timeout_millis=1000)
-            provider.add_span_processor(processor)
-            provider.get_tracer("app").start_span("span").end()
-            """,
-            receiver.endpoint,
+        took, stderr = _exit(
+            _start(
+                """
+                provider = TracerProvider()
+                # A request would wait 10 minutes for the collector; shutdown waits 1 s
+                processor = OTLPSpanProcessor(endpoint=endpoint, timeout=600, export_timeout_millis=1000)
+                provider.add_span_processor(processor)
+                provider.get_tracer("app").start_span("span").end()
+                atexit.register(lambda: exit_started.append(time.monotonic()))
+                """,
+                receiver.endpoint,
+            )
         )
     assert len(receiver.received) == 1
-    assert 0.9 < took < LIMIT / 2
+    # Measured in the process, from the first exit handler on: starting Python is no part of it
+    [waited] = [float(line.split()[-1]) for line in stderr.splitlines() if line.startswith("EXIT WAITED")]
+    assert 0.9 < waited < LIMIT / 2
+    assert took < LIMIT / 2
 
 
 @pytest.mark.parametrize("dropped", [False, True], ids=["kept", "garbage-collected"])
@@ -161,7 +178,9 @@ def test_a_daemon_thread_waiting_in_force_flush_does_not_hold_exit_up(receiver: 
             receiver.endpoint,
         )
         assert len(receiver.wait_for_requests(1, timeout=LIMIT)) == 1
-        took = _exit(process, "go\n")
+        # The process would exit in time anyway; what this checks is that the thread is not left to take the GIL
+        # back inside Rust code during finalization (STILL INSIDE, before 3.14)
+        took, _ = _exit(process, "go\n")
     assert took < LIMIT / 2
 
 
@@ -194,3 +213,28 @@ def test_daemon_threads_still_ending_spans_at_exit(receiver: FakeReceiver, shutd
     )
     assert receiver.spans()
     assert took < LIMIT / 2
+
+
+def test_a_provider_older_than_the_import_still_exports_at_exit(receiver: FakeReceiver) -> None:
+    # Its exit handler runs after fastotel's, which has closed the processor to the daemon threads by then; the
+    # thread that exits still shuts it down and exports, waiting without the GIL while they go on
+    _run(
+        """
+        tracer = provider.get_tracer("app")
+        provider.add_span_processor(OTLPSpanProcessor(endpoint=endpoint, schedule_delay_millis=600_000))
+        tracer.start_span("queued").end()
+
+        def emit():
+            while True:
+                tracer.start_span("daemon").end()
+
+        for _ in range(4):
+            threading.Thread(target=emit, daemon=True).start()
+        time.sleep(0.2)
+        """,
+        receiver.endpoint,
+        before_import="""
+        provider = TracerProvider()
+        """,
+    )
+    assert "queued" in [span.name for span in receiver.spans()]

@@ -74,23 +74,29 @@ has Rust frames on its stack while `on_end` calls the span's properties, which a
 GIL up, and while `force_flush` or `shutdown` waits without the GIL. So fastotel registers an exit handler of its
 own, at import, which runs after the handlers of providers created later, and so after their shutdowns:
 
-- each processor alive (a `WeakSet`) closes to every other thread: there `on_end` drops and counts spans without
+- each processor alive (a `WeakSet`; one created by a later exit handler closes as it is created) closes to every
+  other thread: there `on_end` drops and counts spans without
   calling into Python, `force_flush` and `shutdown` return False without letting go of the GIL, and a flush or
-  shutdown they are waiting in returns False now (a crossbeam channel the handler disconnects). The thread that runs
+  shutdown they are waiting in returns False now (a crossbeam channel the handler disconnects), without abandoning
+  the worker, which goes on exporting while the process lives. The thread that runs
   the handler goes on as before, the check costing only once the processor is closed, so the exit handlers after
   it, the shutdown of a provider older than the import of fastotel among them, still end spans, flush and export;
-  a daemon thread cannot take that shutdown from it. Such late handlers may log after `logging`'s own exit handler
-  has closed the handlers, as any code there does.
+  a daemon thread can no longer take that shutdown from it. Such late handlers may log after `logging`'s own exit
+  handler has closed the handlers, as any code there does.
 - before 3.14, a thread that comes back from such a wait without the GIL hangs there for good instead of taking
   the GIL back, as 3.14 hangs a daemon thread itself: every other thread is a daemon one by then (the interpreter
   has joined the others before the exit handlers), and the process ends it. A first version woke these threads to
   take the GIL back during the handler, and one CI run caught one that had not got it in time.
-- before 3.14, the handler then waits, up to 2 s and letting go of the GIL every millisecond, until no other thread
+- before 3.14, the handler then waits, letting go of the GIL every millisecond, until no other thread
   can take the GIL inside Rust code: none is back from a wait and not hanging yet (a native counter around
   `detach`), and none runs Python code that the native module called, which shows in `sys._current_frames()` as a
   frame above `on_end`, `force_flush` or `shutdown` of `OTLPSpanProcessor`. Native code takes the GIL nowhere else,
-  so a thread whose topmost frame is one of those calls is harmless. From then on a daemon thread that enters them
-  leaves without giving up the GIL inside Rust.
+  so a thread whose topmost frame is one of those calls is harmless (but for a garbage collection the copy sets off
+  whose deallocator lets go of the GIL, which nothing in the span holds). It waits up to 2 s for threads in Python
+  code and up to 10 s for a thread that only has to take the GIL back, which a narrow race between a wait's end and
+  the handler leaves. From then on a daemon thread that enters those calls leaves without giving up the GIL inside
+  Rust.
+- a build without the GIL gets none of this before 3.14: 3.13t has no wheel and is not supported (README).
 
 This costs `on_end` nothing: the check is the same atomic load as after shutdown. The tests end processes with daemon
 threads ending spans and flushing, ten times each with and without the provider's handler, and with a daemon thread
@@ -134,8 +140,9 @@ A panic never unwinds into Python or past the worker's loop:
 - `shutdown` waits `export_timeout_millis`, where `BatchProcessor` waits 30 s (ADR 0004), and stops the exports once
   the wait is over (ADR 0006).
 - A span that comes after shutdown is counted, sampled or not, but not logged, until #14.
-- At exit, after the providers' handlers, fastotel's own handler closes every processor and, before 3.14, waits up
-  to 2 s for other threads to leave its native calls.
+- At exit, after the providers' handlers, fastotel's own handler closes every processor to the other threads and,
+  before 3.14, leaves those back from a wait hanging and waits a few seconds at most for the others to leave its
+  native calls.
 
 ## Consequences
 

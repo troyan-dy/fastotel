@@ -123,7 +123,8 @@ longer than the timeout (None waits `export_timeout_millis`), and after `shutdow
 
 `TracerProvider` shuts its processors down at exit unless created with `shutdown_on_exit=False`; fastotel does not
 flush at exit on its own, as `BatchSpanProcessor` does not. Its worker is a native thread that the interpreter does
-not wait for, so the process never waits for it beyond that shutdown. Spans still queued when the process ends:
+not wait for, so the process never waits for it beyond that shutdown (and, before Python 3.14, a few seconds
+at most for daemon threads to leave fastotel's code). Spans still queued when the process ends:
 
 | How the process ends | Spans still queued |
 | --- | --- |

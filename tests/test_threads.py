@@ -4,6 +4,7 @@ parallel, on a GIL build they switch at any point. Every span ends up exported e
 """
 
 import threading
+import time
 from collections.abc import Callable
 
 from fastotel import OTLPSpanProcessor
@@ -14,6 +15,8 @@ from receiver import FakeReceiver
 EMITTING = 32
 FLUSHING = 4
 SPANS = 1000
+# A deadlock fails the test after this many seconds rather than hang the run; a slow runner needs a few
+TIMEOUT = 120
 
 
 def _run(receiver: FakeReceiver, midway: Callable[[OTLPSpanProcessor], None]) -> tuple[OTLPSpanProcessor, int]:
@@ -33,33 +36,45 @@ def _run(receiver: FakeReceiver, midway: Callable[[OTLPSpanProcessor], None]) ->
     start = threading.Barrier(EMITTING + FLUSHING + 1)
     emitting = threading.Event()
     emitting.set()
+    errors: list[BaseException] = []
 
     def emit(index: int) -> None:
-        start.wait()
-        for i in range(SPANS):
-            tracer.start_span("span").end()
-            ended[index] += 1
-            if i == SPANS // 2:
-                half.release()
+        try:
+            start.wait(TIMEOUT)
+            for i in range(SPANS):
+                tracer.start_span("span").end()
+                ended[index] += 1
+                if i == SPANS // 2:
+                    half.release()
+        except BaseException as error:
+            errors.append(error)
+            half.release()
 
     def flush() -> None:
-        start.wait()
-        while emitting.is_set():
-            processor.force_flush(10000)
+        try:
+            start.wait(TIMEOUT)
+            while emitting.is_set():
+                processor.force_flush(10000)
+        except BaseException as error:
+            errors.append(error)
 
-    emitters = [threading.Thread(target=emit, args=(index,)) for index in range(EMITTING)]
-    flushers = [threading.Thread(target=flush) for _ in range(FLUSHING)]
+    # Daemon threads, so that a deadlock fails the test instead of keeping the process alive
+    emitters = [threading.Thread(target=emit, args=(index,), daemon=True) for index in range(EMITTING)]
+    flushers = [threading.Thread(target=flush, daemon=True) for _ in range(FLUSHING)]
     for thread in emitters + flushers:
         thread.start()
-    start.wait()
+    start.wait(TIMEOUT)
     for _ in range(EMITTING):
-        half.acquire()
+        assert half.acquire(timeout=TIMEOUT), "an emitting thread is stuck"
     midway(processor)
+    deadline = time.monotonic() + TIMEOUT
     for thread in emitters:
-        thread.join()
+        thread.join(max(deadline - time.monotonic(), 0))
     emitting.clear()
     for thread in flushers:
-        thread.join()
+        thread.join(max(deadline - time.monotonic(), 0))
+    assert not any(thread.is_alive() for thread in emitters + flushers), "a thread is stuck"
+    assert errors == []
     # Every export has been answered, and so recorded, once shutdown returns True; after one midway, at once
     assert processor._native.shutdown()
     return processor, sum(ended)

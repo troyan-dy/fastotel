@@ -191,7 +191,7 @@ impl Pipeline {
         }
         match self.worker.get() {
             Some(Some(worker)) if worker.in_this_process() => {
-                worker.request(Control::Flush, timeout, &self.exit_ends_the_wait())
+                worker.request(Control::Flush, timeout, &self.exit_ends_the_wait()) == Answer::Done
             }
             _ => true,
         }
@@ -212,20 +212,22 @@ impl Pipeline {
         // Waits for a worker that a concurrent first push is starting, and keeps one from starting later
         match self.worker.get_or_init(|| None) {
             Some(worker) if worker.in_this_process() => {
-                let done = worker.request(Control::Shutdown, timeout, &self.exit_ends_the_wait());
-                if !done {
-                    // As the reference shuts its exporter down once the wait is over, which ends its retries
+                let answer = worker.request(Control::Shutdown, timeout, &self.exit_ends_the_wait());
+                if answer == Answer::TimedOut {
+                    // As the reference shuts its exporter down once the wait is over, which ends its retries; an
+                    // exit leaves the worker exporting while the process lives
                     let _ = worker.abandon.try_send(());
-                } else if let Some(thread) = worker
-                    .thread
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .take()
+                } else if answer == Answer::Done
+                    && let Some(thread) = worker
+                        .thread
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take()
                 {
                     // The worker has answered and is returning
                     let _ = thread.join();
                 }
-                done
+                answer == Answer::Done
             }
             _ => true,
         }
@@ -431,24 +433,35 @@ impl Worker {
         self.pid == process::id()
     }
 
-    /// Whether the worker has answered within `timeout`, and before anything comes from `interrupt`. It never
+    /// Whether the worker has answered within `timeout`, before anything comes from `interrupt`. It never
     /// does once it has stopped: after a shutdown that came first, or on a panic.
     fn request(
         &self,
         make: fn(Sender<()>) -> Control,
         timeout: Duration,
         interrupt: &Receiver<()>,
-    ) -> bool {
+    ) -> Answer {
         let (done, answer) = bounded(1);
         if self.control.send(make(done)).is_err() {
-            return false;
+            return Answer::None;
         }
         select! {
-            recv(answer) -> answered => answered.is_ok(),
-            recv(interrupt) -> _ => false,
-            default(timeout) => false,
+            recv(answer) -> answered => if answered.is_ok() { Answer::Done } else { Answer::None },
+            recv(interrupt) -> _ => Answer::Interrupted,
+            default(timeout) => Answer::TimedOut,
         }
     }
+}
+
+/// How a request to the worker ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Done,
+    TimedOut,
+    /// By exit, which leaves the worker alone
+    Interrupted,
+    /// The worker has stopped without answering
+    None,
 }
 
 /// Where the worker sends its batches: the HTTP client, or a test's.
