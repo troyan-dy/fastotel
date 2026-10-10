@@ -110,12 +110,17 @@ def end_every_kind_of_span(*processors: SpanProcessor) -> int:
     app.start_span("publish", kind=SpanKind.PRODUCER).end()
     ended += 2
 
-    # Another tracer object for the same scope shares its ScopeSpans; another version is another scope
-    tracer(checkout, "app", "1.2.3", "https://example.com/2", {"team": "cart", **ATTRIBUTES}).start_span("same").end()
+    # Another provider makes other but equal resource and scope objects, which share the ResourceSpans and the
+    # ScopeSpans (a provider hands out the same tracer for equal scopes); another version is another scope
+    again = provider(
+        Resource({"service.name": "checkout", "service.instance.id": "é-1", **ATTRIBUTES}, "https://example.com/1"),
+        processors,
+    )
+    tracer(again, "app", "1.2.3", "https://example.com/2", {"team": "cart", **ATTRIBUTES}).start_span("same").end()
     tracer(checkout, "app", "2.0").start_span("other version").end()
     # Scopes whose attributes differ only in order are equal for the SDK
     tracer(checkout, "ordered", attributes={"a": 1, "b": 2}).start_span("a, b").end()
-    tracer(checkout, "ordered", attributes={"b": 2, "a": 1}).start_span("b, a").end()
+    tracer(again, "ordered", attributes={"b": 2, "a": 1}).start_span("b, a").end()
     ended += 4
 
     # Limits make the SDK drop attributes, events and links, and count them

@@ -17,7 +17,8 @@ pub enum Value {
 }
 
 /// Equal when they encode the same: doubles compare by their bits, so that a resource with a NaN in it still
-/// groups with its own copy.
+/// groups with its own copy. Python compares values more loosely (1 == 1.0 == True, 0.0 == -0.0) and a NaN
+/// equal only to itself, so the reference may group a few odd resources and scopes otherwise (ADR 0003).
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -51,7 +52,8 @@ pub struct Resource {
     pub schema_url: String,
 }
 
-/// Equal as the SDK's `Resource.__eq__` has it, so spans group as the reference groups them.
+/// Equal as the SDK's `Resource.__eq__` has it, up to how values compare, so spans group as the reference groups
+/// them.
 impl PartialEq for Resource {
     fn eq(&self, other: &Self) -> bool {
         self.schema_url == other.schema_url && same_attributes(&self.attributes, &other.attributes)
@@ -67,7 +69,7 @@ pub struct Scope {
     pub schema_url: String,
 }
 
-/// Equal as the SDK's `InstrumentationScope.__eq__` has it.
+/// Equal as the SDK's `InstrumentationScope.__eq__` has it, up to how values compare.
 impl PartialEq for Scope {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name

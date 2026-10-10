@@ -62,9 +62,9 @@ impl Processor {
 }
 
 impl Processor {
-    /// The `ReadableSpan` as a `SpanData`, or None when it is not sampled. A span with a string that is not
-    /// valid UTF-8 outside its attributes (the reference cannot encode it and loses the whole batch) fails here,
-    /// so that only this span is dropped.
+    /// The `ReadableSpan` as a `SpanData`, or None when it is not sampled. A string field outside the attributes
+    /// that protobuf cannot take (not valid UTF-8, not a str, bytes or None) makes the reference lose the whole
+    /// batch; here it fails the copy, so that only this span is dropped.
     fn copy(&self, span: &Bound<'_, PyAny>) -> PyResult<Option<SpanData>> {
         let py = span.py();
         let context = span.getattr(intern!(py, "context"))?;
@@ -108,7 +108,7 @@ impl Processor {
                             &resource.getattr(intern!(py, "attributes"))?,
                             RESOURCE_ATTRIBUTES,
                         )?,
-                        schema_url: optional_string(&resource.getattr(intern!(py, "schema_url"))?)?,
+                        schema_url: proto_string(&resource.getattr(intern!(py, "schema_url"))?)?,
                     })
                 })?;
         let scope = self.scopes.get_or_copy(
@@ -119,14 +119,14 @@ impl Processor {
                     return Ok(None);
                 }
                 Ok(Some(Scope {
-                    name: scope.getattr(intern!(py, "name"))?.extract()?,
-                    version: optional_string(&scope.getattr(intern!(py, "version"))?)?,
+                    name: proto_string(&scope.getattr(intern!(py, "name"))?)?,
+                    version: proto_string(&scope.getattr(intern!(py, "version"))?)?,
                     // Scopes have attributes from SDK 1.26
                     attributes: match optional_attr(scope, intern!(py, "attributes"))? {
                         Some(attributes) => copy_attributes(&attributes, SCOPE_ATTRIBUTES)?,
                         None => Vec::new(),
                     },
-                    schema_url: optional_string(&scope.getattr(intern!(py, "schema_url"))?)?,
+                    schema_url: proto_string(&scope.getattr(intern!(py, "schema_url"))?)?,
                 }))
             },
         )?;
@@ -134,7 +134,7 @@ impl Processor {
         for event in span.getattr(intern!(py, "events"))?.try_iter()? {
             let event = event?;
             events.push(Event {
-                name: event.getattr(intern!(py, "name"))?.extract()?,
+                name: proto_string(&event.getattr(intern!(py, "name"))?)?,
                 time_unix_nano: event.getattr(intern!(py, "timestamp"))?.extract()?,
                 attributes: copy_attributes(
                     &event.getattr(intern!(py, "attributes"))?,
@@ -160,7 +160,7 @@ impl Processor {
             span_id: context.getattr(intern!(py, "span_id"))?.extract()?,
             trace_state: copy_trace_state(&context.getattr(intern!(py, "trace_state"))?)?,
             parent,
-            name: span.getattr(intern!(py, "name"))?.extract()?,
+            name: proto_string(&span.getattr(intern!(py, "name"))?)?,
             kind,
             start_time_unix_nano: span
                 .getattr(intern!(py, "start_time"))?
@@ -181,7 +181,7 @@ impl Processor {
             dropped_links_count: dropped(span, intern!(py, "dropped_links"))?,
             status: Status {
                 code,
-                message: optional_string(&status.getattr(intern!(py, "description"))?)?,
+                message: proto_string(&status.getattr(intern!(py, "description"))?)?,
             },
             resource,
             scope,
@@ -232,9 +232,18 @@ fn copy_trace_state(trace_state: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(joined)
 }
 
-/// A string that may be None, which the reference sends as an empty one.
-fn optional_string(value: &Bound<'_, PyAny>) -> PyResult<String> {
-    Ok(value.extract::<Option<String>>()?.unwrap_or_default())
+/// A string field as protobuf takes it from the reference: None is empty and bytes are decoded as UTF-8. The SDK
+/// does not check the type of names, so `start_span(None)` reaches here.
+fn proto_string(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    if value.is_none() {
+        return Ok(String::new());
+    }
+    if let Ok(value) = value.cast::<PyBytes>() {
+        return Ok(std::str::from_utf8(value.as_bytes())
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
+            .to_owned());
+    }
+    Ok(value.cast::<PyString>()?.to_str()?.to_owned())
 }
 
 /// An attribute that older SDKs do not have.
@@ -268,11 +277,8 @@ fn copy_attributes(attributes: &Bound<'_, PyAny>, depth: usize) -> PyResult<Attr
     }
     for item in attributes.call_method0(intern!(py, "items"))?.try_iter()? {
         let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
-        let attribute = key
-            .cast::<PyString>()
-            .map_err(PyErr::from)
-            .and_then(|key| Ok(key.to_str()?.to_owned()))
-            .and_then(|key| Ok((key, copy_value(&value, depth + 1)?)));
+        let attribute =
+            proto_string(&key).and_then(|key| Ok((key, copy_value(&value, depth + 1)?)));
         match attribute {
             Ok(attribute) => copied.push(attribute),
             // KeyboardInterrupt and SystemExit go through
@@ -308,9 +314,10 @@ fn copy_value(value: &Bound<'_, PyAny>, depth: usize) -> PyResult<Value> {
         return Ok(Value::Bytes(value.as_bytes().to_vec()));
     }
     let is_sequence = value.cast::<PySequence>().is_ok();
+    let is_mapping = !is_sequence && value.cast::<PyMapping>().is_ok();
     // An ArrayValue holding AnyValues, or a KeyValueList of KeyValues holding AnyValues: the AnyValues check
     // their own depth, the list checks it for when it is empty
-    if (is_sequence || value.cast::<PyMapping>().is_ok()) && depth + 1 > MAX_DEPTH {
+    if (is_sequence || is_mapping) && depth + 1 > MAX_DEPTH {
         return Err(PyValueError::new_err("the value is nested too deeply"));
     }
     if is_sequence {
@@ -320,7 +327,7 @@ fn copy_value(value: &Bound<'_, PyAny>, depth: usize) -> PyResult<Value> {
         }
         return Ok(Value::Array(values));
     }
-    if value.cast::<PyMapping>().is_ok() {
+    if is_mapping {
         let mut values = Vec::new();
         for item in value
             .call_method0(intern!(value.py(), "items"))?

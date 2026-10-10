@@ -41,11 +41,18 @@ from the OTLP specification.
   for them and #8 lists them: the reference leaves them out, so fastotel does too, and only sampled spans are
   exported anyway. Likewise a link carries no trace state, and a resource no dropped attribute count.
 - The trace state is `key=value` pairs joined by commas, in the order of the `TraceState`. The status is always
-  present, its code and description; a description of None is empty.
+  present, its code and description.
+- String fields (names, version, schema URLs, description, attribute keys) are what protobuf makes of the value:
+  None is empty and bytes are decoded as UTF-8. The SDK does not check the type of a name, so `start_span(None)`
+  and `start_span(b"name")` reach the exporter.
 - Spans group into `ResourceSpans` and `ScopeSpans` by the SDK's equality, as the reference groups them in dicts:
   resources by attributes (as a dict, whatever their order) and schema URL, scopes by name, version, schema URL and
-  attributes. Doubles compare by their bits, so a resource with a NaN still groups with its copy. A span without
-  a scope goes into a `ScopeSpans` of its own with an empty scope.
+  attributes. A span without a scope goes into a `ScopeSpans` of its own with an empty scope. Values compare as
+  they encode, which is stricter than Python in a few odd cases where the reference groups otherwise: Python has
+  1 == 1.0 == True and 0.0 == -0.0, which can merge two scopes whose attributes differ only that way (resources
+  hash such values apart, so it does not merge them); and two NaN objects are unequal in Python, so the reference
+  keeps apart two resources or scopes that differ only by being built with separate NaNs, which fastotel, comparing
+  doubles by their bits, merges. No span is lost either way, only the grouping differs.
 - Older SDKs lack some fields (the dropped attribute counts of events and links, scope attributes before 1.26):
   they are sent as 0 or empty.
 
@@ -56,8 +63,9 @@ it out in the same cases, named in `tests/test_compatibility.py`:
 
 - an int beyond int64, anywhere in the value;
 - a string or a mapping key that is not valid UTF-8 (a lone surrogate), anywhere in the value;
-- a value of a type OTLP has no value for, a key that is not a str, a sequence whose iteration fails, a
-  self-referencing list: things a hand-built `ReadableSpan` can hold, which the SDK cleans away otherwise.
+- a value of a type OTLP has no value for, a key that is not a str, bytes or None, a sequence whose iteration
+  fails, a self-referencing list: things a hand-built `ReadableSpan` can hold, which the SDK cleans away
+  otherwise.
 
 Two cases where fastotel deliberately differs:
 
@@ -69,9 +77,9 @@ Two cases where fastotel deliberately differs:
   whatever the depth. The test compares with the reference where it leaves the attribute out (upb) and checks the
   limit of fastotel on its own.
 - **Strings outside attributes.** A span name, event name, status description, scope name, version or schema URL,
-  or resource schema URL that is not valid UTF-8 makes the reference's encoder raise for the whole request: the
-  exporter logs it and loses the batch. fastotel drops that span alone (its copy fails in `on_end`) and sends the
-  others.
+  or resource schema URL that protobuf cannot take (not valid UTF-8, or not a str, bytes or None) makes the
+  reference's encoder raise for the whole request: the exporter logs it and loses the batch. fastotel drops that
+  span alone (its copy fails in `on_end`) and sends the others.
 
 ## Consequences
 

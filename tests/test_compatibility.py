@@ -4,8 +4,8 @@ The compatibility test of #1: the same spans go through the reference `OTLPSpanE
 """
 
 import math
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, TypeVar, overload
 
 import pytest
 from fastotel import OTLPSpanProcessor
@@ -25,6 +25,7 @@ from opentelemetry.trace.span import TraceState
 from receiver import FakeReceiver
 from spans import INT64_MAX, INT64_MIN, SAMPLED, end_every_kind_of_span, tracer
 
+_T = TypeVar("_T")
 # A ScopeSpans as compared: the scope, its schema URL and the spans, sorted
 Scope = tuple[str, list[str]]
 # A ResourceSpans as compared: the resource with its schema URL, and its scopes in order
@@ -48,25 +49,32 @@ def _text(message: Message) -> str:
 
 def grouped(requests: list[ExportTraceServiceRequest]) -> Grouped:
     """
-    The resources, scopes and spans of `requests` as one request: groups equal across requests merge, since
-    batch boundaries may differ, and the spans of a scope are sorted.
+    The resources, scopes and spans of `requests` as one request, the spans of each scope sorted. Groups merge
+    with an equal one of an earlier request, since batch boundaries may differ, but not within a request: there
+    two equal groups are a difference in grouping.
     """
-    resources: list[tuple[str, list[tuple[str, list[str]]]]] = []
+    resources: Grouped = []
     for request in requests:
+        merged_resources: list[int] = []
         for resource_spans in request.resource_spans:
             resource = f"{_text(resource_spans.resource)}schema_url: {resource_spans.schema_url!r}"
-            scopes = next((s for r, s in resources if r == resource), None)
-            if scopes is None:
-                scopes = []
-                resources.append((resource, scopes))
+            scopes = _group(resources, resource, merged_resources)
+            merged_scopes: list[int] = []
             for scope_spans in resource_spans.scope_spans:
                 scope = f"{_text(scope_spans.scope)}schema_url: {scope_spans.schema_url!r}"
-                spans = next((s for c, s in scopes if c == scope), None)
-                if spans is None:
-                    spans = []
-                    scopes.append((scope, spans))
-                spans.extend(_text(span) for span in scope_spans.spans)
+                _group(scopes, scope, merged_scopes).extend(_text(span) for span in scope_spans.spans)
     return [(resource, [(scope, sorted(spans)) for scope, spans in scopes]) for resource, scopes in resources]
+
+
+def _group(groups: list[tuple[str, list[_T]]], key: str, taken: list[int]) -> list[_T]:
+    """
+    The values of the group `key` that no group of the same request has taken yet, a new group if there is none.
+    """
+    index = next((i for i, (k, _) in enumerate(groups) if k == key and i not in taken), len(groups))
+    if index == len(groups):
+        groups.append((key, []))
+    taken.append(index)
+    return groups[index][1]
 
 
 def through_both(end_spans: Callable[[SpanProcessor, SpanProcessor], object]) -> tuple[Grouped, Grouped]:
@@ -92,6 +100,8 @@ def test_every_field_is_sent_as_the_reference_sends_it() -> None:
     assert fastotel == reference
     # Every span is in the comparison, none was lost on either side
     assert sum(len(spans) for _, scopes in reference for _, spans in scopes) == ended[0]
+    # Equal resources of two providers are one, the other is the one with limits
+    assert len(reference) == 2
 
 
 def test_the_comparison_merges_batches_and_tells_scopes_apart() -> None:
@@ -103,6 +113,10 @@ def test_the_comparison_merges_batches_and_tells_scopes_apart() -> None:
     [(_, [(_, spans)])] = grouped([request, request])
     assert spans == ['name: "a"\n'] * 2
     assert grouped([request]) != grouped([other])
+    split = ExportTraceServiceRequest()
+    split.resource_spans.add().scope_spans.add().spans.add(name="a")
+    split.resource_spans.add().scope_spans.add().spans.add(name="a")
+    assert len(grouped([split])) == 2
 
 
 def _all_text(requests: Grouped) -> str:
@@ -115,6 +129,22 @@ class _Unknown:
     """
     A type OTLP has no value for, with no `__str__` of its own, so the SDK would replace it with None.
     """
+
+
+class _Unreadable(Sequence[int]):
+    """
+    A sequence whose items cannot be read.
+    """
+
+    def __len__(self) -> int:
+        return 1
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[int]: ...
+    def __getitem__(self, index: int | slice) -> int | Sequence[int]:
+        raise RuntimeError("unreadable")
 
 
 def _self_referencing() -> list[Any]:
@@ -209,6 +239,7 @@ UNCLEANED: dict[str, tuple[Any, Any]] = {
     "a type OTLP has no value for": ("odd", _Unknown()),
     "a type OTLP has no value for, in a sequence": ("odd", (1, _Unknown())),
     "a self-referencing list": ("odd", _self_referencing()),
+    "a sequence whose iteration fails": ("odd", _Unreadable()),
     "a key that is not a str": (1, "odd"),
 }
 
@@ -236,14 +267,23 @@ def test_an_attribute_the_sdk_would_have_cleaned_is_left_out_as_by_the_reference
     assert '"after"' in _all_text(fastotel)
 
 
-def test_a_span_with_a_name_that_is_not_utf8_is_dropped_alone() -> None:
-    # The reference cannot encode the name and loses the whole batch; fastotel loses only this span (ADR 0003)
+# Names protobuf cannot take for a string field; the reference then loses the batch, fastotel only the span
+UNENCODABLE_NAMES = {
+    "a lone surrogate": "\ud800",
+    "bytes that are not UTF-8": b"\xff",
+    "neither str, bytes nor None": 1,
+}
+
+
+@pytest.mark.parametrize("name", UNENCODABLE_NAMES.values(), ids=UNENCODABLE_NAMES.keys())
+def test_a_span_with_a_name_protobuf_cannot_take_is_dropped_alone(name: Any) -> None:
+    # The reference's encoder raises for the whole request and the exporter loses the batch (ADR 0003)
     def end_spans(*processors: SpanProcessor) -> None:
         provider = TracerProvider()
         for processor in processors:
             provider.add_span_processor(processor)
         provider.get_tracer("app").start_span("before").end()
-        provider.get_tracer("app").start_span("\ud800").end()
+        provider.get_tracer("app").start_span(name).end()
         provider.get_tracer("app").start_span("after").end()
 
     with FakeReceiver() as ours, FakeReceiver() as theirs:
@@ -256,6 +296,34 @@ def test_a_span_with_a_name_that_is_not_utf8_is_dropped_alone() -> None:
 
         assert [span.name for span in ours.spans()] == ["before", "after"]
         assert theirs.received == []
+
+
+def test_names_and_keys_of_none_or_bytes_are_sent_as_protobuf_takes_them() -> None:
+    # The SDK does not check the type of names; protobuf sends None as empty and decodes bytes as UTF-8
+    def end_spans(*processors: SpanProcessor) -> None:
+        provider = TracerProvider()
+        for processor in processors:
+            provider.add_span_processor(processor)
+        app = provider.get_tracer("app")
+        for name in (None, b"bytes"):
+            span = app.start_span(name)  # type: ignore[arg-type]
+            span.add_event(name)  # type: ignore[arg-type]
+            span.end()
+        by_hand = ReadableSpan(
+            name="by hand",
+            context=SpanContext(trace_id=1, span_id=2, is_remote=False, trace_flags=SAMPLED),
+            resource=Resource({}),
+            attributes={b"bytes": 1},  # type: ignore[dict-item]
+            start_time=1,
+            end_time=2,
+        )
+        for processor in processors:
+            processor.on_end(by_hand)
+
+    fastotel, reference = through_both(end_spans)
+
+    assert fastotel == reference
+    assert _all_text(fastotel).count('"bytes"') == 3
 
 
 # Strings the encoders must agree on, non-ASCII included; lone surrogates only where the reference drops an
