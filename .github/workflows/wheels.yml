@@ -54,9 +54,10 @@ jobs:
         if: matrix.platform.python
         shell: bash
         run: |
+          # The reference exporter and hypothesis for the compatibility test, which compares the two on every platform
           check() {
             uv run --isolated --no-project --python "cpython-$1-$PLATFORM" --with pytest --with "opentelemetry-proto>=1.45" \
-              --with "$(ls dist/*-"$2"-*.whl)" \
+              --with "opentelemetry-exporter-otlp-proto-http>=1.45" --with "hypothesis>=6" --with "$(ls dist/*-"$2"-*.whl)" \
               pytest -p no:cacheprovider tests
           }
           check 3.11 abi3

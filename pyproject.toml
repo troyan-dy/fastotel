@@ -1,6 +1,6 @@
 [project]
 name = "fastotel"
-version = "0.4.0"
+version = "0.5.0"
 description = "A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path"
 readme = "README.md"
 license = "MIT"
@@ -45,12 +45,15 @@ bench = [
   "pyperf>=2.10",
 ]
 dev = [
+  "hypothesis>=6",
   "maturin>=1.15,<2",
   "mypy>=1.13",
   # The fake OTLP receiver of the tests decodes requests with it
+  "opentelemetry-exporter-otlp-proto-http>=1.45",
   "opentelemetry-proto>=1.45",
   "pytest>=8.3",
   "ruff>=0.8",
+  "types-protobuf>=5",
 ]
 
 [build-system]

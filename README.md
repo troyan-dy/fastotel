@@ -7,9 +7,9 @@
 
 A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path.
 
-> **Status: pre-alpha.** `OTLPSpanProcessor` sends spans over OTLP/HTTP, but only some of their fields so far
-> (ids, name, kind, times, string attributes), with no retries, gzip or `OTEL_*` configuration, and a process
-> forked after the first span exports nothing from the child. The road to 1.0 is in
+> **Status: pre-alpha.** `OTLPSpanProcessor` sends every field of a span over OTLP/HTTP, encoded as
+> `OTLPSpanExporter` encodes it, but with no retries, gzip or `OTEL_*` configuration yet, and a process forked
+> after the first span exports nothing from the child. The road to 1.0 is in
 > [#5](https://github.com/troyan-dy/fastotel/issues/5).
 
 ## Why
@@ -56,7 +56,9 @@ trace.set_tracer_provider(provider)
 `endpoint` is the URL spans are posted to, `/v1/traces` included, as for `OTLPSpanExporter`; the one above is the
 default. `on_end` copies the span into Rust and returns; a native thread, started by the first span, batches,
 encodes and sends spans without taking the GIL. As with `BatchSpanProcessor`, only sampled spans are exported, a
-batch leaves at 512 spans or every 5 seconds, and spans beyond a queue of 2048 are dropped.
+batch leaves at 512 spans or every 5 seconds, and spans beyond a queue of 2048 are dropped. The requests decode to
+what `OTLPSpanExporter` sends for the same spans; where they differ is in
+[ADR 0003](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0003-span-encoding.md).
 
 ## Development
 
