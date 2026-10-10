@@ -15,7 +15,20 @@ from receiver import FakeReceiver
 LIMIT = 60
 
 _PRELUDE = """
-import sys, threading, time
+import atexit, sys, threading, time
+
+@atexit.register
+def _check_daemon_threads_are_out():
+    # Registered before fastotel's exit handler, so it runs after it: no thread may be left where finalization
+    # would end it inside Rust code; the frames tell where
+    from fastotel import _processor
+    if sys.version_info < (3, 14) and _processor._inside_native_code():
+        frames = sys._current_frames()
+        import traceback
+        for ident, frame in frames.items():
+            print("THREAD", ident, "".join(traceback.format_stack(frame)), file=sys.stderr)
+        print("STILL INSIDE fastotel after its exit handler", file=sys.stderr, flush=True)
+
 from opentelemetry.sdk.trace import TracerProvider
 from fastotel import OTLPSpanProcessor
 
@@ -25,7 +38,7 @@ endpoint = sys.argv[1]
 
 def _start(script: str, endpoint: str) -> subprocess.Popen[str]:
     return subprocess.Popen(  # noqa: S603 - the test's own interpreter and script
-        [sys.executable, "-c", _PRELUDE + textwrap.dedent(script), endpoint],
+        [sys.executable, "-X", "faulthandler", "-c", _PRELUDE + textwrap.dedent(script), endpoint],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -47,7 +60,7 @@ def _exit(process: subprocess.Popen[str], stdin: str = "") -> float:
     took = time.monotonic() - started
     assert process.returncode == 0, stderr
     # Neither a panic nor a crash on the way out, nor an exception ignored by the interpreter
-    for sign in ("panicked", "Fatal Python error", "Traceback", "Exception ignored"):
+    for sign in ("panicked", "Fatal Python error", "Traceback", "Exception ignored", "STILL INSIDE"):
         assert sign not in stderr, stderr
     return took
 
@@ -153,7 +166,7 @@ def test_a_daemon_thread_waiting_in_force_flush_does_not_hold_exit_up(receiver: 
 
 
 @pytest.mark.parametrize("shutdown_on_exit", [True, False])
-@pytest.mark.parametrize("run", range(5))
+@pytest.mark.parametrize("run", range(10))
 def test_daemon_threads_still_ending_spans_at_exit(receiver: FakeReceiver, shutdown_on_exit: bool, run: int) -> None:
     # They go on through the provider's shutdown and into the interpreter's finalization, flushing too. Where they
     # stop depends on the scheduler, hence several runs

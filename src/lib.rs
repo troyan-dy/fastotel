@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -100,7 +101,7 @@ impl Processor {
         if self.pipeline.is_closed() && !self.pipeline.open_on_this_thread() {
             return false;
         }
-        let flushed = py.detach(|| {
+        let flushed = detach_counted(py, || {
             panic::catch_unwind(AssertUnwindSafe(|| {
                 self.pipeline.force_flush(millis(timeout_millis))
             }))
@@ -119,7 +120,7 @@ impl Processor {
         if self.pipeline.exited_elsewhere() {
             return false;
         }
-        let done = py.detach(|| {
+        let done = detach_counted(py, || {
             panic::catch_unwind(AssertUnwindSafe(|| {
                 self.pipeline
                     .shutdown(self.pipeline.config().export_timeout)
@@ -195,6 +196,29 @@ impl Processor {
             );
         }
     }
+}
+
+/// The threads inside `detach_counted`, for the exit handler to wait for.
+static DETACHED: AtomicUsize = AtomicUsize::new(0);
+
+/// `py.detach(f)`, counted in `DETACHED` until the thread holds the GIL again: until then, at exit, it is a thread
+/// that would take the GIL back inside Rust code.
+fn detach_counted<T: Send>(py: Python<'_>, f: impl Send + FnOnce() -> T) -> T {
+    struct Counted;
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            DETACHED.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    DETACHED.fetch_add(1, Ordering::SeqCst);
+    let _counted = Counted;
+    py.detach(f)
+}
+
+/// The number of threads waiting in `force_flush` or `shutdown` without the GIL, or taking it back.
+#[pyfunction]
+fn detached() -> usize {
+    DETACHED.load(Ordering::SeqCst)
 }
 
 /// An error on the `fastotel` logger; a logger that fails is left alone, as there is nowhere else to report.
@@ -562,7 +586,7 @@ impl<T> Copies<T> {
 #[pymodule(gil_used = false)]
 mod _fastotel {
     #[pymodule_export]
-    use super::Processor;
+    use super::{Processor, detached};
 
     // What a panic becomes in Python; the tests raise it from a span to make the copy panic
     #[pymodule_export]

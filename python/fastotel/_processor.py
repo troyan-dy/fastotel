@@ -147,12 +147,12 @@ class OTLPSpanProcessor(SpanProcessor):
 
 # Every processor alive, for the exit handler
 _processors: "weakref.WeakSet[OTLPSpanProcessor]" = weakref.WeakSet()
-# The frames of the calls into the native module: a thread with one of them on its stack is inside it
+# The frames of the calls into the native module
 _NATIVE_CALLS = frozenset(
     {OTLPSpanProcessor.on_end.__code__, OTLPSpanProcessor.force_flush.__code__, OTLPSpanProcessor.shutdown.__code__}
 )
 # How long the exit handler waits for other threads to leave the native module
-_EXIT_WAIT_SECONDS = 1.0
+_EXIT_WAIT_SECONDS = 2.0
 
 
 @atexit.register
@@ -161,10 +161,11 @@ def _at_exit() -> None:
     Keeps daemon threads out of the native module before the interpreter finalizes.
 
     Registered at import, so it runs after the exit handlers of the providers created later, which shut their
-    processors down. From here on `on_end` drops and counts spans without calling into Python, and `force_flush`
-    and `shutdown` waiting on other threads return False. Before 3.14 CPython ends a daemon thread that takes the
-    GIL during finalization with `pthread_exit`, which on glibc unwinds its stack and aborts the process when Rust
-    frames are on it, so this also waits until no other thread is inside a call to the native module.
+    processors down. From here on, on other threads, `on_end` drops and counts spans without calling into Python,
+    and `force_flush` and `shutdown` return False without letting go of the GIL, ending the waits they are in. Before
+    3.14 CPython ends a daemon thread that takes the GIL during finalization with `pthread_exit`, which on glibc
+    unwinds its stack and aborts the process when Rust frames are on it, so this also waits until no other thread
+    can take the GIL inside the native module.
     """
     for processor in list(_processors):
         processor._native.exiting()
@@ -172,19 +173,28 @@ def _at_exit() -> None:
         # Such a thread hangs instead, which is harmless
         return
     deadline = time.monotonic() + _EXIT_WAIT_SECONDS
-    while _inside_native_calls() and time.monotonic() < deadline:
-        # Lets those threads take the GIL and finish the call they are in
+    while _inside_native_code() and time.monotonic() < deadline:
+        # Lets those threads take the GIL and leave
         time.sleep(0.001)
 
 
-def _inside_native_calls() -> bool:
+def _inside_native_code() -> bool:
+    """
+    Whether another thread can take the GIL inside Rust code: it waits without the GIL in `force_flush` or
+    `shutdown`, or runs Python code that the native module called (a span's properties, a log), which shows as a
+    frame above one of the calls into it. Otherwise native code takes no GIL, so a thread whose topmost frame is the
+    call itself is about to enter it, or back from it, and harmless.
+    """
+    if _fastotel.detached():
+        return True
     current = threading.get_ident()
-    for ident, frame in sys._current_frames().items():
-        if ident == current:
-            continue
-        while frame is not None:
+    for ident, top in sys._current_frames().items():
+        frame = top
+        while ident != current and frame is not None:
             if frame.f_code in _NATIVE_CALLS:
-                return True
+                if frame is not top:
+                    return True
+                break
             frame = frame.f_back  # type: ignore[assignment]
     return False
 
