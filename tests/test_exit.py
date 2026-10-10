@@ -101,7 +101,11 @@ def test_without_shutdown_exit_does_not_wait_for_the_worker(receiver: FakeReceiv
             for i in range(100):
                 tracer.start_span("queued").end()
             if {dropped}:
+                import gc, weakref
+                collected = weakref.ref(processor)
                 del provider, processor, tracer
+                gc.collect()
+                assert collected() is None
             """,
             receiver.endpoint,
         )

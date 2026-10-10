@@ -186,7 +186,7 @@ impl Pipeline {
     /// Export every span queued so far; false when that takes longer than `timeout`, after shutdown, as
     /// `BatchSpanProcessor`'s, or when the worker has stopped on a panic.
     pub fn force_flush(&self, timeout: Duration) -> bool {
-        if self.is_closed() {
+        if self.is_closed() && !self.open_on_this_thread() {
             return false;
         }
         match self.worker.get() {
@@ -201,6 +201,10 @@ impl Pipeline {
     /// export takes longer than `timeout`, and then the worker stops retrying and drops, counted, what it has not
     /// sent.
     pub fn shutdown(&self, timeout: Duration) -> bool {
+        // Left to the thread that has called exit, whose wait would not end at once
+        if self.exited_elsewhere() {
+            return false;
+        }
         if self.shut_down.swap(true, Ordering::AcqRel) {
             return true;
         }
@@ -227,9 +231,9 @@ impl Pipeline {
         }
     }
 
-    /// The interpreter is about to finalize: spans are dropped and counted from now on, a flush returns false at
-    /// once, and the flushes and shutdowns other threads are waiting in return false now. The worker goes on, and
-    /// a shutdown on this thread still exports what is queued.
+    /// The interpreter is about to finalize: on other threads spans are dropped and counted from now on, a flush
+    /// or shutdown returns false at once, and the flushes and shutdowns they are waiting in return false now. The
+    /// worker goes on, and on this thread spans, flushes and a shutdown work as before.
     ///
     /// Before 3.14 CPython ends a daemon thread that takes the GIL during finalization with `pthread_exit`, which
     /// on glibc unwinds the stack and aborts the process when Rust frames are on it; this keeps daemon threads
@@ -241,6 +245,14 @@ impl Pipeline {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+    }
+
+    /// Whether a closed pipeline still takes spans and flushes on this thread: the one that called `exit`, until
+    /// shutdown. Its exit handlers that come later, a provider's shutdown among them, go on as before; checked only
+    /// once [`is_closed`](Self::is_closed), so it costs `on_end` nothing.
+    pub fn open_on_this_thread(&self) -> bool {
+        !self.shut_down.load(Ordering::Acquire)
+            && self.exiting_thread.get() == Some(&thread::current().id())
     }
 
     /// Whether `exit` has been called on another thread: a wait here ends at once.
@@ -658,8 +670,12 @@ mod tests {
         // A push that has counted its span and sends it a little later: close waits for it
         queue.queued.fetch_add(1, Ordering::SeqCst);
         let late = queue.spans.clone();
+        let closed = Arc::clone(&queue.queued);
         let sender = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
+            // Sent only once close has taken the count, so that close has to wait for it
+            while closed.load(Ordering::SeqCst) != CLOSED {
+                thread::yield_now();
+            }
             late.send(span()).unwrap();
         });
         assert_eq!(queued.close().len(), 2);
@@ -751,15 +767,16 @@ mod tests {
         assert!(queue.push(span()));
         // Counted before the shutdown and sent after it, as by a push that shutdown overtakes
         queue.queued.fetch_add(1, Ordering::SeqCst);
-        let (late, sent) = (queue.spans.clone(), bounded::<()>(0));
+        let (late, closed) = (queue.spans.clone(), Arc::clone(&queue.queued));
         let sender = thread::spawn(move || {
-            sent.1.recv().unwrap();
+            // Once the worker has closed the queue, so that it has to wait for this one
+            while closed.load(Ordering::SeqCst) != CLOSED {
+                thread::yield_now();
+            }
             late.send(span()).unwrap();
         });
         let (done, answer) = bounded(1);
         control.send(Control::Shutdown(done)).unwrap();
-        thread::sleep(Duration::from_millis(50));
-        sent.0.send(()).unwrap();
         assert!(answer.recv_timeout(Duration::from_secs(10)).is_ok());
         sender.join().unwrap();
         thread.join().unwrap();

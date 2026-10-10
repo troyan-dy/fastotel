@@ -21,7 +21,7 @@ def _run(receiver: FakeReceiver, midway: Callable[[OTLPSpanProcessor], None]) ->
     Ends SPANS spans on each of EMITTING threads while FLUSHING threads flush in a loop, calls `midway` once
     half the spans have ended, then shuts down; the processor and the spans ended.
     """
-    # A small queue and quick exports, so that spans are dropped and batches leave by size, by delay and by flush
+    # Quick exports, so that batches leave by size, by delay and by flush; spans are dropped when the queue fills
     processor = OTLPSpanProcessor(
         endpoint=receiver.endpoint, max_queue_size=8192, max_export_batch_size=512, schedule_delay_millis=20
     )

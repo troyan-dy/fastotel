@@ -97,7 +97,7 @@ impl Processor {
     fn force_flush(&self, py: Python<'_>, timeout_millis: f64) -> bool {
         // Returns false then, without letting go of the GIL, which a daemon thread must not take back while the
         // interpreter finalizes (`Pipeline::exit`)
-        if self.pipeline.is_closed() {
+        if self.pipeline.is_closed() && !self.pipeline.open_on_this_thread() {
             return false;
         }
         let flushed = py.detach(|| {
@@ -114,20 +114,18 @@ impl Processor {
     }
 
     fn shutdown(&self, py: Python<'_>) -> bool {
-        let shutdown = || {
+        // As force_flush: no letting go of the GIL on a daemon thread at exit; the shutdown is left to the thread
+        // that exits, which a provider older than the import of fastotel shuts down after fastotel's exit handler
+        if self.pipeline.exited_elsewhere() {
+            return false;
+        }
+        let done = py.detach(|| {
             panic::catch_unwind(AssertUnwindSafe(|| {
                 self.pipeline
                     .shutdown(self.pipeline.config().export_timeout)
             }))
-        };
-        if self.pipeline.exited_elsewhere() {
-            // Its wait ends at once: keep the GIL, as force_flush does then, and log nothing
-            return shutdown().unwrap_or_else(|_| {
-                self.pipeline.panicked();
-                false
-            });
-        }
-        let done = py.detach(shutdown).unwrap_or_else(|payload| {
+        });
+        let done = done.unwrap_or_else(|payload| {
             self.panicked(py, "shutdown", &*payload);
             false
         });
@@ -172,7 +170,7 @@ impl Processor {
         // One atomic load before the copy, so that a span ended after shutdown costs nothing more. Nothing in
         // Python is called then, not even to tell whether the span is sampled: at exit, a daemon thread must not
         // be stopped inside Rust code (`Pipeline::exit`)
-        if self.pipeline.is_closed() {
+        if self.pipeline.is_closed() && !self.pipeline.open_on_this_thread() {
             self.pipeline.drop_span();
         } else if let Some(span) = self.copy(span)? {
             self.pipeline.push(span);

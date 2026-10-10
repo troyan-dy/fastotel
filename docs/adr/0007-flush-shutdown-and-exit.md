@@ -28,9 +28,10 @@ thread is what fastotel's gain depends on (#18), so nothing here may add to it.
 - **False after `shutdown`**, as `BatchProcessor` 1.45 returns; SDKs up to 1.33 at least logged a warning and returned
   True. A flush that reaches the worker after a concurrent shutdown also returns False: the shutdown has exported
   what it would have.
-- `timeout_millis` takes what `BatchSpanProcessor` and the SDK's multi-processors may pass: an int, a float, or
-  None, which waits `export_timeout_millis`, as `BatchSpanProcessor` did while it honoured the timeout. Negative or
-  NaN is no time, too large to hold no limit.
+- `timeout_millis` defaults to 30000, as #12 and the SDK's `SpanProcessor` have it (`BatchSpanProcessor` 1.45 has
+  None), and takes what `BatchSpanProcessor` and the SDK's multi-processors may pass: an int, a float, or None,
+  which waits `export_timeout_millis`, as `BatchSpanProcessor` did while it honoured the timeout. Negative or NaN is
+  no time, too large to hold no limit.
 
 ### shutdown
 
@@ -73,10 +74,13 @@ has Rust frames on its stack while `on_end` calls the span's properties, which a
 GIL up, and while `force_flush` or `shutdown` waits without the GIL. So fastotel registers an exit handler of its
 own, at import, which runs after the handlers of providers created later, and so after their shutdowns:
 
-- each processor alive (a `WeakSet`) closes: `on_end` drops and counts spans without calling into Python,
-  `force_flush` returns False without letting go of the GIL, and a flush or shutdown other threads are waiting in
-  returns False now (a crossbeam channel the handler disconnects). The thread that runs the handler keeps waiting
-  as before, so the shutdown of a provider whose handler runs later, being older than the import, still exports.
+- each processor alive (a `WeakSet`) closes to every other thread: there `on_end` drops and counts spans without
+  calling into Python, `force_flush` and `shutdown` return False without letting go of the GIL, and a flush or
+  shutdown they are waiting in returns False now (a crossbeam channel the handler disconnects). The thread that runs
+  the handler goes on as before, the check costing only once the processor is closed, so the exit handlers after
+  it, the shutdown of a provider older than the import of fastotel among them, still end spans, flush and export;
+  a daemon thread cannot take that shutdown from it. Such late handlers may log after `logging`'s own exit handler
+  has closed the handlers, as any code there does.
 - before 3.14, the handler then waits, up to 1 s and letting go of the GIL every millisecond, until no other thread
   has `on_end`, `force_flush` or `shutdown` of `OTLPSpanProcessor` on its stack (`sys._current_frames()`). From
   then on a daemon thread that enters them leaves without giving up the GIL inside Rust.
@@ -109,7 +113,8 @@ A panic never unwinds into Python or past the worker's loop:
   goes on with the next one. A panic elsewhere in its loop ends the worker, closes the queue and counts what is in
   it as failed, so later spans are dropped and counted and `force_flush` returns False. The worker cannot reach
   Python, so it keeps up to 16 messages, and the next `force_flush` or `shutdown` logs them; #14 hands them over as
-  they happen.
+  they happen. A test can make the worker panic only in Rust, so the tests check the count and the messages kept,
+  not the log line.
 - The locks recover from poisoning, so that a panic caught once does not turn into a panic per call. The process's
   panic hook, which prints the panic to stderr, belongs to the application and is left alone.
 - The native module exports PyO3's `PanicException`: Python code that raises it into Rust resumes the panic there,

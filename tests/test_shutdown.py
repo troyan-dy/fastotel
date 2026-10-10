@@ -66,7 +66,7 @@ def test_force_flush_takes_any_timeout_batch_span_processor_takes(
     assert len(receiver.spans()) == 1
 
 
-def test_shutdown_waits_export_timeout_millis_and_force_flush_none_too(receiver: FakeReceiver) -> None:
+def test_force_flush_none_waits_export_timeout_millis(receiver: FakeReceiver) -> None:
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, export_timeout_millis=300)
     with receiver.stalled():
         processor.on_end(_span())
@@ -153,24 +153,28 @@ def test_a_panic_in_on_end_is_caught_logged_and_counted(
     assert len(receiver.spans()) == 1
 
 
-def test_exiting_ends_the_waits_of_other_threads_and_drops_spans(receiver: FakeReceiver) -> None:
+def test_exiting_ends_the_waits_of_other_threads_and_drops_their_spans(receiver: FakeReceiver) -> None:
     # What the exit handler does to each processor before the interpreter finalizes
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, export_timeout_millis=60000)
-    with receiver.stalled():
-        processor.on_end(_span("before"))
-        with ThreadPoolExecutor(1) as pool:
-            flushed = pool.submit(processor.force_flush, 60000)
+    with ThreadPoolExecutor(1) as other:
+        with receiver.stalled():
+            processor.on_end(_span("before"))
+            flushed = other.submit(processor.force_flush, 60000)
             assert len(receiver.wait_for_requests(1)) == 1
             started = time.monotonic()
             processor._native.exiting()
             # A daemon thread waiting would otherwise take the GIL back during finalization
             assert flushed.result(timeout=10) is False
             assert time.monotonic() - started < 5
-        processor.on_end(_span("after"))
-        assert processor.force_flush() is False
-    assert processor._native.dropped_spans() == 1
-    # The thread that ran the exit handler still shuts down as the provider's handler would
-    processor.on_end(_span("after"))
-    processor.shutdown()
-    assert [span.name for span in receiver.spans()] == ["before"]
+        # Other threads: spans dropped and counted, no flush, no shutdown
+        other.submit(processor.on_end, _span("other")).result()
+        assert other.submit(processor.force_flush).result() is False
+        other.submit(processor.shutdown).result()
+        assert processor._native.dropped_spans() == 1
+        # The thread that ran the exit handler goes on, as the exit handlers after it, a provider's among them, do
+        processor.on_end(_span("exiting"))
+        assert processor.force_flush()
+        processor.shutdown()
+        other.submit(processor.on_end, _span("other")).result()
+    assert [span.name for span in receiver.spans()] == ["before", "exiting"]
     assert processor._native.dropped_spans() == 2

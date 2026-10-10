@@ -15,8 +15,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   counted as failed, and is logged at the next flush or shutdown.
 - `force_flush` takes a float or None for `timeout_millis`; None waits `export_timeout_millis`.
 - Spans ended after `shutdown` are counted as dropped, as `BatchSpanProcessor` counts sampled ones in its metrics.
-- An exit handler, run after those of the providers, closes every processor and, before Python 3.14, waits up to
-  1 s for daemon threads to leave the native code, which CPython would otherwise end in a way that aborts the
+- An exit handler, run after those of the providers, closes every processor to the other threads and, before
+  Python 3.14, waits up to 1 s for daemon threads to leave the native code, which CPython would otherwise end in a way that aborts the
   process on glibc.
 - The README says what happens to spans still queued at exit in each case; tests run each exit in a process of its
   own, and 32 threads end spans alongside flushes and a shutdown on GIL and free-threaded builds.
@@ -28,7 +28,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - `force_flush` returns False after `shutdown`, as `BatchSpanProcessor` 1.45 does.
 - `on_end` after `shutdown` no longer copies the span: one atomic load, and the span is counted.
 - `shutdown` closes the queue, so a span ended while it runs is exported or counted as dropped, never lost
-  unnoticed.
+  unnoticed. Spans that find no worker, because the thread could not be started, are counted as dropped too.
 
 ## [0.8.0] - 2026-10-10
 
