@@ -130,6 +130,24 @@ def test_sys_exit_in_a_thread_ends_only_that_thread(receiver: FakeReceiver) -> N
     assert sorted(span.name for span in receiver.spans()) == ["from the main thread", "from the thread"]
 
 
+def test_a_daemon_thread_waiting_in_force_flush_does_not_hold_exit_up(receiver: FakeReceiver) -> None:
+    with receiver.stalled():
+        process = _start(
+            """
+            provider = TracerProvider()
+            processor = OTLPSpanProcessor(endpoint=endpoint, timeout=600, export_timeout_millis=500)
+            provider.add_span_processor(processor)
+            provider.get_tracer("app").start_span("span").end()
+            threading.Thread(target=processor.force_flush, args=(600_000,), daemon=True).start()
+            sys.stdin.readline()
+            """,
+            receiver.endpoint,
+        )
+        assert len(receiver.wait_for_requests(1, timeout=LIMIT)) == 1
+        took = _exit(process, "go\n")
+    assert took < LIMIT / 2
+
+
 @pytest.mark.parametrize("shutdown_on_exit", [True, False])
 @pytest.mark.parametrize("run", range(5))
 def test_daemon_threads_still_ending_spans_at_exit(receiver: FakeReceiver, shutdown_on_exit: bool, run: int) -> None:

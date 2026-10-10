@@ -95,6 +95,11 @@ impl Processor {
 
     /// Milliseconds as a float, as `force_flush(timeout_millis)` may get them: negative or NaN is no time.
     fn force_flush(&self, py: Python<'_>, timeout_millis: f64) -> bool {
+        // Returns false then, without letting go of the GIL, which a daemon thread must not take back while the
+        // interpreter finalizes (`Pipeline::exit`)
+        if self.pipeline.is_closed() {
+            return false;
+        }
         let flushed = py.detach(|| {
             panic::catch_unwind(AssertUnwindSafe(|| {
                 self.pipeline.force_flush(millis(timeout_millis))
@@ -109,18 +114,30 @@ impl Processor {
     }
 
     fn shutdown(&self, py: Python<'_>) -> bool {
-        let done = py.detach(|| {
+        let shutdown = || {
             panic::catch_unwind(AssertUnwindSafe(|| {
                 self.pipeline
                     .shutdown(self.pipeline.config().export_timeout)
             }))
-        });
-        let done = done.unwrap_or_else(|payload| {
+        };
+        if self.pipeline.exited_elsewhere() {
+            // Its wait ends at once: keep the GIL, as force_flush does then, and log nothing
+            return shutdown().unwrap_or_else(|_| {
+                self.pipeline.panicked();
+                false
+            });
+        }
+        let done = py.detach(shutdown).unwrap_or_else(|payload| {
             self.panicked(py, "shutdown", &*payload);
             false
         });
         self.log_worker_panics(py);
         done
+    }
+
+    /// Called at exit, before the interpreter finalizes: see `Pipeline::exit`.
+    fn exiting(&self) {
+        self.pipeline.exit();
     }
 
     /// The spans dropped so far because the queue was full or the processor shut down; `stats()` exposes the
@@ -152,12 +169,11 @@ impl Processor {
 
 impl Processor {
     fn end(&self, span: &Bound<'_, PyAny>) -> PyResult<()> {
-        // One atomic load before the copy, so that a span ended after shutdown costs nothing more
-        if self.pipeline.is_shut_down() {
-            // Counted as BatchSpanProcessor counts it, only when it would have been exported
-            if sampled(span)? {
-                self.pipeline.drop_span();
-            }
+        // One atomic load before the copy, so that a span ended after shutdown costs nothing more. Nothing in
+        // Python is called then, not even to tell whether the span is sampled: at exit, a daemon thread must not
+        // be stopped inside Rust code (`Pipeline::exit`)
+        if self.pipeline.is_closed() {
+            self.pipeline.drop_span();
         } else if let Some(span) = self.copy(span)? {
             self.pipeline.push(span);
         }
@@ -192,16 +208,6 @@ fn log_error(py: Python<'_>, message: &str) {
     if let Err(error) = logged {
         error.write_unraisable(py, None);
     }
-}
-
-/// Whether the span is sampled, the only spans `BatchSpanProcessor` exports; the copy reads it on its own.
-fn sampled(span: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = span.py();
-    let trace_flags: u8 = span
-        .getattr(intern!(py, "context"))?
-        .getattr(intern!(py, "trace_flags"))?
-        .extract()?;
-    Ok(trace_flags & 1 == 1)
 }
 
 /// Seconds as the reference exporter takes them, a float. What its requests cannot wait for fails every request

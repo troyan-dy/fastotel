@@ -2,10 +2,10 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::thread::{self, JoinHandle};
+use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, never, select, unbounded};
 use prost::Message;
 use ureq::http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use ureq::tls::{RootCerts, TlsConfig};
@@ -85,17 +85,29 @@ pub struct Pipeline {
     config: Config,
     // None once shut down before the first span, or when the thread could not be started
     worker: OnceLock<Option<Worker>>,
+    // Set by shutdown or exit: spans are dropped and counted from then on
+    closed: AtomicBool,
     shut_down: AtomicBool,
     counters: Arc<Counters>,
+    // Dropped by exit, which wakes the flushes and shutdowns other threads are waiting in
+    exit: Mutex<Option<Sender<()>>>,
+    exited: Receiver<()>,
+    // The thread that called exit, whose waits it does not end
+    exiting_thread: OnceLock<ThreadId>,
 }
 
 impl Pipeline {
     pub fn new(config: Config) -> Self {
+        let (exit, exited) = bounded(0);
         Self {
             config,
             worker: OnceLock::new(),
+            closed: AtomicBool::new(false),
             shut_down: AtomicBool::new(false),
             counters: Arc::default(),
+            exit: Mutex::new(Some(exit)),
+            exited,
+            exiting_thread: OnceLock::new(),
         }
     }
 
@@ -106,8 +118,8 @@ impl Pipeline {
     /// Queue a span for export, starting the worker on the first one. Never blocks: when the queue is full, or
     /// once shutdown has taken what is queued, the span is dropped and counted.
     ///
-    /// The caller checks [`is_shut_down`](Self::is_shut_down) first, so that a span ended after shutdown is not
-    /// even copied; a push racing shutdown is exported or counted all the same.
+    /// The caller checks [`is_closed`](Self::is_closed) first, so that a span ended after shutdown is not even
+    /// copied; a push racing shutdown is exported or counted all the same.
     pub fn push(&self, span: SpanData) {
         match self
             .worker
@@ -125,12 +137,12 @@ impl Pipeline {
         }
     }
 
-    /// Whether `shutdown` has been called: from then on spans are dropped and counted.
-    pub fn is_shut_down(&self) -> bool {
-        self.shut_down.load(Ordering::Acquire)
+    /// Whether `shutdown` or `exit` has been called: from then on spans are dropped and counted.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
-    /// Count a span that is not pushed because the pipeline is shut down.
+    /// Count a span that is not pushed because the pipeline is closed.
     pub fn drop_span(&self) {
         self.counters.dropped.fetch_add(1, Ordering::Relaxed);
     }
@@ -174,12 +186,12 @@ impl Pipeline {
     /// Export every span queued so far; false when that takes longer than `timeout`, after shutdown, as
     /// `BatchSpanProcessor`'s, or when the worker has stopped on a panic.
     pub fn force_flush(&self, timeout: Duration) -> bool {
-        if self.is_shut_down() {
+        if self.is_closed() {
             return false;
         }
         match self.worker.get() {
             Some(Some(worker)) if worker.in_this_process() => {
-                worker.request(Control::Flush, timeout)
+                worker.request(Control::Flush, timeout, &self.exit_ends_the_wait())
             }
             _ => true,
         }
@@ -192,10 +204,11 @@ impl Pipeline {
         if self.shut_down.swap(true, Ordering::AcqRel) {
             return true;
         }
+        self.closed.store(true, Ordering::Release);
         // Waits for a worker that a concurrent first push is starting, and keeps one from starting later
         match self.worker.get_or_init(|| None) {
             Some(worker) if worker.in_this_process() => {
-                let done = worker.request(Control::Shutdown, timeout);
+                let done = worker.request(Control::Shutdown, timeout, &self.exit_ends_the_wait());
                 if !done {
                     // As the reference shuts its exporter down once the wait is over, which ends its retries
                     let _ = worker.abandon.try_send(());
@@ -211,6 +224,38 @@ impl Pipeline {
                 done
             }
             _ => true,
+        }
+    }
+
+    /// The interpreter is about to finalize: spans are dropped and counted from now on, a flush returns false at
+    /// once, and the flushes and shutdowns other threads are waiting in return false now. The worker goes on, and
+    /// a shutdown on this thread still exports what is queued.
+    ///
+    /// Before 3.14 CPython ends a daemon thread that takes the GIL during finalization with `pthread_exit`, which
+    /// on glibc unwinds the stack and aborts the process when Rust frames are on it; this keeps daemon threads
+    /// out of the pipeline's waits and out of Python code called from Rust.
+    pub fn exit(&self) {
+        self.closed.store(true, Ordering::Release);
+        let _ = self.exiting_thread.set(thread::current().id());
+        self.exit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
+
+    /// Whether `exit` has been called on another thread: a wait here ends at once.
+    pub fn exited_elsewhere(&self) -> bool {
+        self.exiting_thread
+            .get()
+            .is_some_and(|exiting| *exiting != thread::current().id())
+    }
+
+    /// What ends a wait early: exit, unless this is the thread that called it.
+    fn exit_ends_the_wait(&self) -> Receiver<()> {
+        if self.exiting_thread.get() == Some(&thread::current().id()) {
+            never()
+        } else {
+            self.exited.clone()
         }
     }
 }
@@ -374,11 +419,23 @@ impl Worker {
         self.pid == process::id()
     }
 
-    /// Whether the worker has answered within `timeout`. It never does once it has stopped: after a shutdown
-    /// that came first, or on a panic.
-    fn request(&self, make: fn(Sender<()>) -> Control, timeout: Duration) -> bool {
+    /// Whether the worker has answered within `timeout`, and before anything comes from `interrupt`. It never
+    /// does once it has stopped: after a shutdown that came first, or on a panic.
+    fn request(
+        &self,
+        make: fn(Sender<()>) -> Control,
+        timeout: Duration,
+        interrupt: &Receiver<()>,
+    ) -> bool {
         let (done, answer) = bounded(1);
-        self.control.send(make(done)).is_ok() && answer.recv_timeout(timeout).is_ok()
+        if self.control.send(make(done)).is_err() {
+            return false;
+        }
+        select! {
+            recv(answer) -> answered => answered.is_ok(),
+            recv(interrupt) -> _ => false,
+            default(timeout) => false,
+        }
     }
 }
 

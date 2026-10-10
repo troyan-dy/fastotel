@@ -91,7 +91,7 @@ class _Recording:
         return getattr(self.span, name)
 
 
-def test_on_end_after_shutdown_reads_only_whether_the_span_is_sampled(receiver: FakeReceiver) -> None:
+def test_on_end_after_shutdown_reads_nothing_from_the_span(receiver: FakeReceiver) -> None:
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
     processor.shutdown()
 
@@ -100,10 +100,10 @@ def test_on_end_after_shutdown_reads_only_whether_the_span_is_sampled(receiver: 
     processor.on_end(sampled)  # type: ignore[arg-type]
     processor.on_end(not_sampled)  # type: ignore[arg-type]
 
-    # Not copied; counted as dropped when it would have been exported, as BatchSpanProcessor counts it
-    assert sampled.read == ["context"]
-    assert not_sampled.read == ["context"]
-    assert processor._native.dropped_spans() == 1
+    # Not even whether it is sampled, which would run Python code inside the native call: each is counted as
+    # dropped, where BatchSpanProcessor counts only the sampled one
+    assert sampled.read == not_sampled.read == []
+    assert processor._native.dropped_spans() == 2
     assert receiver.received == []
 
 
@@ -151,3 +151,26 @@ def test_a_panic_in_on_end_is_caught_logged_and_counted(
     processor.on_end(_span())
     processor.shutdown()
     assert len(receiver.spans()) == 1
+
+
+def test_exiting_ends_the_waits_of_other_threads_and_drops_spans(receiver: FakeReceiver) -> None:
+    # What the exit handler does to each processor before the interpreter finalizes
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint, export_timeout_millis=60000)
+    with receiver.stalled():
+        processor.on_end(_span("before"))
+        with ThreadPoolExecutor(1) as pool:
+            flushed = pool.submit(processor.force_flush, 60000)
+            assert len(receiver.wait_for_requests(1)) == 1
+            started = time.monotonic()
+            processor._native.exiting()
+            # A daemon thread waiting would otherwise take the GIL back during finalization
+            assert flushed.result(timeout=10) is False
+            assert time.monotonic() - started < 5
+        processor.on_end(_span("after"))
+        assert processor.force_flush() is False
+    assert processor._native.dropped_spans() == 1
+    # The thread that ran the exit handler still shuts down as the provider's handler would
+    processor.on_end(_span("after"))
+    processor.shutdown()
+    assert [span.name for span in receiver.spans()] == ["before"]
+    assert processor._native.dropped_spans() == 2

@@ -1,5 +1,10 @@
+import atexit
 import logging
 import os
+import sys
+import threading
+import time
+import weakref
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
@@ -116,6 +121,7 @@ class OTLPSpanProcessor(SpanProcessor):
             max_export_batch_size,
             export_timeout_millis,
         )
+        _processors.add(self)
 
     def on_end(self, span: ReadableSpan) -> None:
         self._native.on_end(span)
@@ -137,6 +143,50 @@ class OTLPSpanProcessor(SpanProcessor):
             timeout_millis = self._export_timeout_millis
         # Negative or NaN is an expired timeout, too many milliseconds to hold no limit
         return self._native.force_flush(timeout_millis)
+
+
+# Every processor alive, for the exit handler
+_processors: "weakref.WeakSet[OTLPSpanProcessor]" = weakref.WeakSet()
+# The frames of the calls into the native module: a thread with one of them on its stack is inside it
+_NATIVE_CALLS = frozenset(
+    {OTLPSpanProcessor.on_end.__code__, OTLPSpanProcessor.force_flush.__code__, OTLPSpanProcessor.shutdown.__code__}
+)
+# How long the exit handler waits for other threads to leave the native module
+_EXIT_WAIT_SECONDS = 1.0
+
+
+@atexit.register
+def _at_exit() -> None:
+    """
+    Keeps daemon threads out of the native module before the interpreter finalizes.
+
+    Registered at import, so it runs after the exit handlers of the providers created later, which shut their
+    processors down. From here on `on_end` drops and counts spans without calling into Python, and `force_flush`
+    and `shutdown` waiting on other threads return False. Before 3.14 CPython ends a daemon thread that takes the
+    GIL during finalization with `pthread_exit`, which on glibc unwinds its stack and aborts the process when Rust
+    frames are on it, so this also waits until no other thread is inside a call to the native module.
+    """
+    for processor in list(_processors):
+        processor._native.exiting()
+    if sys.version_info >= (3, 14):
+        # Such a thread hangs instead, which is harmless
+        return
+    deadline = time.monotonic() + _EXIT_WAIT_SECONDS
+    while _inside_native_calls() and time.monotonic() < deadline:
+        # Lets those threads take the GIL and finish the call they are in
+        time.sleep(0.001)
+
+
+def _inside_native_calls() -> bool:
+    current = threading.get_ident()
+    for ident, frame in sys._current_frames().items():
+        if ident == current:
+            continue
+        while frame is not None:
+            if frame.f_code in _NATIVE_CALLS:
+                return True
+            frame = frame.f_back  # type: ignore[assignment]
+    return False
 
 
 def _read(path: str | None) -> bytes | None:
