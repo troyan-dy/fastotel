@@ -1,11 +1,12 @@
 //! Sending a batch: compression, TLS and retries, as the OTLP/HTTP specification asks and as the reference
 //! exporter (`_OTLPHTTPClient` of opentelemetry-exporter-otlp-common 1.45) does them.
 
+use std::any::Any;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -161,14 +162,55 @@ fn check_client_cert(chain: &[Certificate<'static>], key_pem: &[u8]) -> Result<(
 /// What the pipeline counts, for `stats()` of #14.
 #[derive(Debug, Default)]
 pub struct Counters {
-    /// Spans dropped because the queue was full
+    /// Spans dropped because the queue was full, or because they came after shutdown
     pub dropped: AtomicU64,
-    /// Spans of batches dropped because their export failed
+    /// Spans of batches dropped because their export failed, or because the worker panicked
     pub failed: AtomicU64,
     /// Spans the collector rejected in a partial success
     pub rejected: AtomicU64,
     /// Requests sent again
     pub retries: AtomicU64,
+    /// Panics caught, on the worker or at the boundary with Python
+    pub panics: AtomicU64,
+    // The messages of the worker's panics, until the extension takes them to the `fastotel` logger
+    panic_messages: Mutex<Vec<String>>,
+}
+
+impl Counters {
+    /// Count a panic caught on the worker and keep its message for the log.
+    pub(crate) fn worker_panicked(&self, payload: &(dyn Any + Send)) {
+        self.panics.fetch_add(1, Ordering::Relaxed);
+        let mut messages = self
+            .panic_messages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A worker panicking with every batch while nobody takes the messages stays within bounds
+        if messages.len() < MAX_PANIC_MESSAGES {
+            messages.push(panic_message(payload));
+        }
+    }
+
+    /// The messages of the worker's panics since the last call.
+    pub(crate) fn take_panic_messages(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .panic_messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+}
+
+/// The worker's panics kept for the log until the extension takes them.
+const MAX_PANIC_MESSAGES: usize = 16;
+
+/// The message of a panic, as the default hook prints it.
+pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "Box<dyn Any>".to_owned())
 }
 
 /// The worker's HTTP client: one `Agent`, so connections are reused across exports.
