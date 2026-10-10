@@ -38,6 +38,9 @@ class OTLPSpanProcessor(SpanProcessor):
     The other arguments are those of `BatchSpanProcessor`, with its `OTEL_BSP_*` variables, defaults and checks: a
     batch leaves at `max_export_batch_size` spans or `schedule_delay_millis` after the previous export, a span ended
     while `max_queue_size` spans wait is dropped, and `shutdown` waits `export_timeout_millis` for the last export.
+
+    `TracerProvider` shuts its processors down at exit; without that, spans still queued at exit are lost. A panic
+    in the native code is caught, counted and logged on the `fastotel` logger; it never reaches the application.
     """
 
     def __init__(
@@ -118,11 +121,22 @@ class OTLPSpanProcessor(SpanProcessor):
         self._native.on_end(span)
 
     def shutdown(self) -> None:
+        """
+        Exports what is queued, waiting up to `export_timeout_millis`, and stops the worker. Spans ended afterwards
+        are dropped and counted; a second call does nothing.
+        """
         self._native.shutdown()
 
-    def force_flush(self, timeout_millis: int = 30000) -> bool:
-        # A negative timeout is an expired one, not an OverflowError from the native side
-        return self._native.force_flush(max(timeout_millis, 0))
+    def force_flush(self, timeout_millis: float | None = 30000) -> bool:
+        """
+        Exports every span ended before the call. False when that takes longer than `timeout_millis`, and after
+        `shutdown`, as `BatchSpanProcessor` returns; None waits `export_timeout_millis`, as `BatchSpanProcessor` did
+        while it still honoured the timeout.
+        """
+        if timeout_millis is None:
+            timeout_millis = self._export_timeout_millis
+        # Negative or NaN is an expired timeout, too many milliseconds to hold no limit
+        return self._native.force_flush(timeout_millis)
 
 
 def _read(path: str | None) -> bytes | None:
