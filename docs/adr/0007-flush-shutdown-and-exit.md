@@ -81,13 +81,17 @@ own, at import, which runs after the handlers of providers created later, and so
   it, the shutdown of a provider older than the import of fastotel among them, still end spans, flush and export;
   a daemon thread cannot take that shutdown from it. Such late handlers may log after `logging`'s own exit handler
   has closed the handlers, as any code there does.
-- before 3.14, the handler then waits, up to 1 s and letting go of the GIL every millisecond, until no other thread
-  has `on_end`, `force_flush` or `shutdown` of `OTLPSpanProcessor` on its stack (`sys._current_frames()`). From
-  then on a daemon thread that enters them leaves without giving up the GIL inside Rust.
+- before 3.14, the handler then waits, up to 2 s and letting go of the GIL every millisecond, until no other thread
+  can take the GIL inside Rust code: none waits in `force_flush` or `shutdown` without it or is taking it back (a
+  native counter around `detach`), and none runs Python code that the native module called, which shows in
+  `sys._current_frames()` as a frame above `on_end`, `force_flush` or `shutdown` of `OTLPSpanProcessor`. Native code
+  takes the GIL nowhere else, so a thread whose topmost frame is one of those calls is harmless. From then on a
+  daemon thread that enters them leaves without giving up the GIL inside Rust.
 
 This costs `on_end` nothing: the check is the same atomic load as after shutdown. The tests end processes with daemon
-threads ending spans and flushing, five times each with and without the provider's handler, and with a daemon
-thread waiting in `force_flush` on a hung collector.
+threads ending spans and flushing, ten times each with and without the provider's handler, and with a daemon thread
+waiting in `force_flush` on a hung collector; an exit handler of the test, which runs after fastotel's, fails the
+test when a thread is still where finalization would end it inside Rust, and faulthandler shows a crash.
 
 Hence:
 
@@ -127,7 +131,7 @@ A panic never unwinds into Python or past the worker's loop:
   the wait is over (ADR 0006).
 - A span that comes after shutdown is counted, sampled or not, but not logged, until #14.
 - At exit, after the providers' handlers, fastotel's own handler closes every processor and, before 3.14, waits up
-  to 1 s for other threads to leave its native calls.
+  to 2 s for other threads to leave its native calls.
 
 ## Consequences
 
