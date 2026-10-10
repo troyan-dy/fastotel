@@ -81,12 +81,16 @@ own, at import, which runs after the handlers of providers created later, and so
   it, the shutdown of a provider older than the import of fastotel among them, still end spans, flush and export;
   a daemon thread cannot take that shutdown from it. Such late handlers may log after `logging`'s own exit handler
   has closed the handlers, as any code there does.
+- before 3.14, a thread that comes back from such a wait without the GIL hangs there for good instead of taking
+  the GIL back, as 3.14 hangs a daemon thread itself: every other thread is a daemon one by then (the interpreter
+  has joined the others before the exit handlers), and the process ends it. A first version woke these threads to
+  take the GIL back during the handler, and one CI run caught one that had not got it in time.
 - before 3.14, the handler then waits, up to 2 s and letting go of the GIL every millisecond, until no other thread
-  can take the GIL inside Rust code: none waits in `force_flush` or `shutdown` without it or is taking it back (a
-  native counter around `detach`), and none runs Python code that the native module called, which shows in
-  `sys._current_frames()` as a frame above `on_end`, `force_flush` or `shutdown` of `OTLPSpanProcessor`. Native code
-  takes the GIL nowhere else, so a thread whose topmost frame is one of those calls is harmless. From then on a
-  daemon thread that enters them leaves without giving up the GIL inside Rust.
+  can take the GIL inside Rust code: none is back from a wait and not hanging yet (a native counter around
+  `detach`), and none runs Python code that the native module called, which shows in `sys._current_frames()` as a
+  frame above `on_end`, `force_flush` or `shutdown` of `OTLPSpanProcessor`. Native code takes the GIL nowhere else,
+  so a thread whose topmost frame is one of those calls is harmless. From then on a daemon thread that enters them
+  leaves without giving up the GIL inside Rust.
 
 This costs `on_end` nothing: the check is the same atomic load as after shutdown. The tests end processes with daemon
 threads ending spans and flushing, ten times each with and without the provider's handler, and with a daemon thread

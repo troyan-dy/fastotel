@@ -1,7 +1,8 @@
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use fastotel_export::{
@@ -26,6 +27,8 @@ struct Processor {
     pipeline: Pipeline,
     resources: Copies<Resource>,
     scopes: Copies<Option<Scope>>,
+    // Set at exit before 3.14: a thread back from a wait without the GIL hangs rather than take it back
+    hang_at_exit: AtomicBool,
 }
 
 #[pymethods]
@@ -77,6 +80,7 @@ impl Processor {
             pipeline: Pipeline::new(config),
             resources: Copies::new(),
             scopes: Copies::new(),
+            hang_at_exit: AtomicBool::new(false),
         })
     }
 
@@ -101,7 +105,7 @@ impl Processor {
         if self.pipeline.is_closed() && !self.pipeline.open_on_this_thread() {
             return false;
         }
-        let flushed = detach_counted(py, || {
+        let flushed = self.detach_counted(py, || {
             panic::catch_unwind(AssertUnwindSafe(|| {
                 self.pipeline.force_flush(millis(timeout_millis))
             }))
@@ -120,7 +124,7 @@ impl Processor {
         if self.pipeline.exited_elsewhere() {
             return false;
         }
-        let done = detach_counted(py, || {
+        let done = self.detach_counted(py, || {
             panic::catch_unwind(AssertUnwindSafe(|| {
                 self.pipeline
                     .shutdown(self.pipeline.config().export_timeout)
@@ -134,8 +138,11 @@ impl Processor {
         done
     }
 
-    /// Called at exit, before the interpreter finalizes: see `Pipeline::exit`.
-    fn exiting(&self) {
+    /// Called at exit, before the interpreter finalizes: see `Pipeline::exit`. With `hang`, a thread that comes
+    /// back from a wait without the GIL afterwards hangs there, as CPython 3.14 hangs a daemon thread that takes
+    /// the GIL during finalization, rather than take the GIL back inside Rust code.
+    fn exiting(&self, hang: bool) {
+        self.hang_at_exit.store(hang, Ordering::SeqCst);
         self.pipeline.exit();
     }
 
@@ -201,18 +208,30 @@ impl Processor {
 /// The threads inside `detach_counted`, for the exit handler to wait for.
 static DETACHED: AtomicUsize = AtomicUsize::new(0);
 
-/// `py.detach(f)`, counted in `DETACHED` until the thread holds the GIL again: until then, at exit, it is a thread
-/// that would take the GIL back inside Rust code.
-fn detach_counted<T: Send>(py: Python<'_>, f: impl Send + FnOnce() -> T) -> T {
-    struct Counted;
-    impl Drop for Counted {
-        fn drop(&mut self) {
-            DETACHED.fetch_sub(1, Ordering::SeqCst);
+impl Processor {
+    /// `py.detach(f)`, counted in `DETACHED` until the thread holds the GIL again: until then, at exit, it is a
+    /// thread that would take the GIL back inside Rust code. Once `exiting(hang=True)` has been called on another
+    /// thread, it hangs instead: at exit every other thread is a daemon one, which the process ends.
+    fn detach_counted<T: Send>(&self, py: Python<'_>, f: impl Send + FnOnce() -> T) -> T {
+        struct Counted;
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DETACHED.fetch_sub(1, Ordering::SeqCst);
+            }
         }
+        DETACHED.fetch_add(1, Ordering::SeqCst);
+        let _counted = Counted;
+        py.detach(|| {
+            let done = f();
+            if self.hang_at_exit.load(Ordering::SeqCst) && self.pipeline.exited_elsewhere() {
+                DETACHED.fetch_sub(1, Ordering::SeqCst);
+                loop {
+                    thread::park();
+                }
+            }
+            done
+        })
     }
-    DETACHED.fetch_add(1, Ordering::SeqCst);
-    let _counted = Counted;
-    py.detach(f)
 }
 
 /// The number of threads waiting in `force_flush` or `shutdown` without the GIL, or taking it back.

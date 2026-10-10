@@ -4,12 +4,13 @@ force_flush and shutdown of #12 with the semantics of BatchSpanProcessor, and Ru
 
 import logging
 import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
-from fastotel import OTLPSpanProcessor
+from fastotel import OTLPSpanProcessor, _fastotel
 from fastotel._fastotel import PanicException
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.sampling import Decision, StaticSampler
@@ -162,7 +163,7 @@ def test_exiting_ends_the_waits_of_other_threads_and_drops_their_spans(receiver:
             flushed = other.submit(processor.force_flush, 60000)
             assert len(receiver.wait_for_requests(1)) == 1
             started = time.monotonic()
-            processor._native.exiting()
+            processor._native.exiting(False)
             # A daemon thread waiting would otherwise take the GIL back during finalization
             assert flushed.result(timeout=10) is False
             assert time.monotonic() - started < 5
@@ -178,3 +179,21 @@ def test_exiting_ends_the_waits_of_other_threads_and_drops_their_spans(receiver:
         other.submit(processor.on_end, _span("other")).result()
     assert [span.name for span in receiver.spans()] == ["before", "exiting"]
     assert processor._native.dropped_spans() == 2
+
+
+def test_exiting_with_hang_leaves_a_waiting_thread_hanging_without_the_gil(receiver: FakeReceiver) -> None:
+    # What the exit handler does before 3.14: the thread never takes the GIL back, so finalization cannot end it
+    # inside Rust code; the process ends it at exit
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
+    with receiver.stalled():
+        processor.on_end(_span())
+        waiting = threading.Thread(target=processor.force_flush, args=(60000,), daemon=True)
+        waiting.start()
+        assert len(receiver.wait_for_requests(1)) == 1
+        processor._native.exiting(True)
+        deadline = time.monotonic() + 10
+        while _fastotel.detached() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert _fastotel.detached() == 0
+        waiting.join(0.2)
+        assert waiting.is_alive()

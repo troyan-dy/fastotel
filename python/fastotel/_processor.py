@@ -167,10 +167,12 @@ def _at_exit() -> None:
     unwinds its stack and aborts the process when Rust frames are on it, so this also waits until no other thread
     can take the GIL inside the native module.
     """
+    # Such a thread hangs from 3.14 on, which is harmless; before, a thread back from a wait without the GIL
+    # hangs too, rather than take it back
+    before_3_14 = sys.version_info < (3, 14)
     for processor in list(_processors):
-        processor._native.exiting()
-    if sys.version_info >= (3, 14):
-        # Such a thread hangs instead, which is harmless
+        processor._native.exiting(before_3_14)
+    if not before_3_14:
         return
     deadline = time.monotonic() + _EXIT_WAIT_SECONDS
     while _inside_native_code() and time.monotonic() < deadline:
@@ -180,10 +182,10 @@ def _at_exit() -> None:
 
 def _inside_native_code() -> bool:
     """
-    Whether another thread can take the GIL inside Rust code: it waits without the GIL in `force_flush` or
-    `shutdown`, or runs Python code that the native module called (a span's properties, a log), which shows as a
-    frame above one of the calls into it. Otherwise native code takes no GIL, so a thread whose topmost frame is the
-    call itself is about to enter it, or back from it, and harmless.
+    Whether another thread can take the GIL inside Rust code: it waits in `force_flush` or `shutdown` without the
+    GIL and is not hanging yet, or runs Python code that the native module called (a span's properties, a log),
+    which shows as a frame above one of the calls into it. Otherwise native code takes no GIL, so a thread whose
+    topmost frame is the call itself is about to enter it, or back from it, and harmless.
     """
     if _fastotel.detached():
         return True
