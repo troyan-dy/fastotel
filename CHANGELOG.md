@@ -6,6 +6,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-10
+
+### Added
+
+- `OTLPSpanProcessor` sends every field of a span, encoded as the reference `OTLPSpanExporter` encodes it (#8):
+  attributes of every type (bool, int, float, str, bytes, None, sequences and mappings, nested) on the span, the
+  resource, the scope, events and links; events, links, status, trace state, the is-remote flags, the dropped
+  counts, schema URLs and scope attributes. Spans group into resources and scopes as the reference groups them.
+- A compatibility test: the same spans, hand-picked and generated with `hypothesis`, go through the reference
+  exporter and through fastotel, and the decoded requests must be equal.
+- `docs/adr/0003-span-encoding.md`: the encoding, the values OTLP cannot express, and the two cases where
+  fastotel differs from the reference: an attribute nested deeper than protobuf decoders accept is left out, and
+  a span whose name or other string field is not valid UTF-8 is dropped alone rather than with its batch.
+
 ## [0.4.0] - 2026-10-10
 
 ### Added
@@ -50,7 +64,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/troyan-dy/fastotel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/troyan-dy/fastotel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/troyan-dy/fastotel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/troyan-dy/fastotel/compare/v0.1.0...v0.2.0
