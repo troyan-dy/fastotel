@@ -36,13 +36,15 @@ thread's cost in `on_end` is what fastotel's gain depends on, so nothing here ma
 ### What the settings do
 
 - **A batch leaves** when `max_export_batch_size` spans are queued, at once, or `schedule_delay_millis` after the
-  previous export, whichever comes first; the delay starts over after every export, as the SDK's worker waits the
-  delay anew after each wake-up. When the delay expires, everything queued leaves, in requests of at most the batch
+  previous export by size or by delay, whichever comes first; the delay starts over after those, as the SDK's
+  worker waits the delay anew after each wake-up, but not after a flush. When the delay expires, everything queued leaves, in requests of at most the batch
   size; the SDK sends one batch then and leaves a remainder smaller than a batch for the next round.
 - **The queue** holds `max_queue_size` spans waiting for export; the batch being sent is out of it, as the SDK pops
   a batch from its deque before exporting it. A span that finds it full is dropped and counted. So while the
   collector hangs, fastotel holds at most `max_queue_size` spans plus the batch in flight, as the SDK does: with the
-  defaults, about 2.5k spans, a few MB (measured in a subprocess by `test_memory_stays_bounded_...`).
+  defaults, about 2.5k spans. `test_memory_stays_bounded_while_the_receiver_is_down` pushes 50k spans of about
+  2 KB in a subprocess and checks the drop count and a peak memory growth under 32 MB (about 8 MB measured for 200k;
+  over 400 MB with a queue of a million).
 - **`export_timeout_millis`** is how long `shutdown()` waits for the last export, which ADR 0002 fixed at 30 s,
   that variable's default, and which #12 asks to be "within the export timeout". The SDK reads the variable and
   does not use it ("No way currently to pass timeout to export", open-telemetry/opentelemetry-python#4555). It does
@@ -56,13 +58,16 @@ ADR 0002 used a bounded `crossbeam-channel` of 2048 that the worker blocked on. 
 - A bounded channel allocates all its slots when it is created, a few hundred bytes each: with a
   `max_queue_size` of a million that is hundreds of MB at the first span. The spans now go through an unbounded
   channel, which allocates blocks as it fills and frees them as it empties, and an atomic counter of queued spans
-  bounds it: `push` adds one and drops the span when that exceeds the queue size; the worker subtracts what it
-  takes out.
+  bounds it: `push` adds one with a compare-and-swap unless the count is at the queue size, and drops the span
+  then; the worker subtracts what it takes out. The count never exceeds the queue size, not even for a moment, so
+  the worker never expects a span that a dropped push will not send. A push counts its span before it sends it,
+  so the worker takes what is in the channel (`try_iter`) rather than waiting for the count: a span still being
+  sent leaves with the next export.
 - The worker no longer waits on the span channel. It waits on its control channel (flush, shutdown) and on a
   one-slot wake-up channel, with the time left until the delay expires; the push that brings the count to the
   batch size sends the wake-up, as the SDK sets its worker's event only then. Before, every push woke the parked
   worker, a system call on the application's thread for every span. `on_end` of a span with 5 attributes went
-  from 3.4–3.9 µs to 2.8–3.1 µs (release build, CPython 3.14, Apple M2 Pro, 1000 spans back to back then a
+  from 3.4–3.9 µs to 2.7–3.1 µs (release build, CPython 3.14, Apple M2 Pro, 1000 spans back to back then a
   flush, medians of 60 rounds); a rough figure, which #18 measures properly.
 
 The drop count lives in the pipeline (`Pipeline::dropped_spans`) and reaches Python as the native
@@ -77,6 +82,9 @@ the others, and logging the drop, which the SDK does with every dropped span, co
   SDK's check `<= 0` lets NaN through, and its worker then waits no time at all and spins. Only an argument can be
   NaN; a variable is an int.
 - **The remainder after the delay** leaves with it, as above, rather than one batch per round.
+- **`shutdown()` waits `export_timeout_millis`**, where the SDK always waits 30 s and ignores the variable: an
+  `OTEL_BSP_EXPORT_TIMEOUT` of 0 or less makes `shutdown()` return at once, and the worker finishes the last
+  export on its own if the process lives long enough.
 
 ## Consequences
 
@@ -86,5 +94,5 @@ the others, and logging the drop, which the SDK does with every dropped span, co
   spans counted when the worker takes the request, which includes every push that returned before it.
 - #14 turns `dropped_spans` into `stats()` and adds the queue length, which is the counter.
 - #13 restarts the worker in a forked child: the counter and the channels go with the `Worker` it replaces.
-- The worker blocks on `recv` for a span that is counted but not yet sent, which lasts as long as a push between
-  its two steps; a push never fails between them.
+- The queue's logic has Rust tests in `crates/export/src/pipeline.rs` (the bound, the wake-up, a counted span
+  not sent yet); the timing and the HTTP side are tested from Python with the fake receiver.

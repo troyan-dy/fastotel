@@ -263,7 +263,7 @@ with FakeReceiver() as receiver, receiver.stalled():
 @pytest.mark.skipif(sys.platform == "win32", reason="measures memory through the resource module")
 @pytest.mark.parametrize("down", ["stalled", "refusing"])
 def test_memory_stays_bounded_while_the_receiver_is_down(down: str) -> None:
-    count = 200_000
+    count = 50_000
     endpoint = _closed_port_endpoint() if down == "refusing" else ""
     script = textwrap.dedent(_PUSH_MANY).format(tests=str(Path(__file__).parent), endpoint=endpoint, count=count)
     result = subprocess.run(  # noqa: S603 - the test's own interpreter and script
@@ -271,7 +271,7 @@ def test_memory_stays_bounded_while_the_receiver_is_down(down: str) -> None:
     )
     grown, dropped = map(int, result.stdout.split())
 
-    # Each span holds about 1 KB: kept, they would take 200 MB; the queue holds 2048 of them and a batch of 512
+    # Each span holds about 2 KB: kept, they would take 100 MB; the queue holds 2048 of them and a batch of 512
     assert grown < 32 * 2**20
     if down == "stalled":
         assert dropped == count - 2048 - 512

@@ -145,14 +145,26 @@ struct Queue {
 impl Queue {
     /// False when the queue is full and the span is dropped.
     fn push(&self, span: SpanData) -> bool {
-        let queued = self.queued.fetch_add(1, Ordering::Relaxed) + 1;
-        if queued > self.max_queue_size {
-            self.queued.fetch_sub(1, Ordering::Relaxed);
-            return false;
+        // A compare-and-swap keeps the count from passing the queue size even for a moment, so a dropped span is
+        // never counted; SeqCst, so that the worker reads this count once it has the wake-up a full batch sends
+        let mut queued = self.queued.load(Ordering::SeqCst);
+        loop {
+            if queued >= self.max_queue_size {
+                return false;
+            }
+            match self.queued.compare_exchange_weak(
+                queued,
+                queued + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(now) => queued = now,
+            }
         }
         // Never blocks, and fails only once the worker has stopped, which happens after a shutdown
         let _ = self.spans.send(span);
-        if queued == self.max_export_batch_size {
+        if queued + 1 == self.max_export_batch_size {
             // A wake-up already pending is enough
             let _ = self.batch_full.try_send(());
         }
@@ -168,16 +180,35 @@ struct Queued {
 
 impl Queued {
     fn len(&self) -> usize {
-        self.queued.load(Ordering::Relaxed)
+        self.queued.load(Ordering::SeqCst)
     }
 
-    /// The next `count` spans, `count` at most `len()`.
+    /// Up to `count` spans. Fewer when a push has counted its span but not sent it yet: waiting for it would
+    /// hang if that thread is preempted, and the span leaves with the next export.
     fn take(&self, count: usize) -> Vec<SpanData> {
-        // A counted span is in the channel or about to be: its push has added to the count and is sending it
-        let spans: Vec<_> = self.spans.iter().take(count).collect();
-        self.queued.fetch_sub(spans.len(), Ordering::Relaxed);
+        let spans: Vec<_> = self.spans.try_iter().take(count).collect();
+        self.queued.fetch_sub(spans.len(), Ordering::SeqCst);
         spans
     }
+}
+
+/// The two sides of a queue, and the channel that wakes the worker when a batch is full.
+fn queue(max_queue_size: usize, max_export_batch_size: usize) -> (Queue, Queued, Receiver<()>) {
+    let (spans, receiver) = unbounded();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let (batch_full, woken) = bounded(1);
+    let queue = Queue {
+        spans,
+        queued: Arc::clone(&queued),
+        max_queue_size,
+        max_export_batch_size,
+        batch_full,
+    };
+    let queued = Queued {
+        spans: receiver,
+        queued,
+    };
+    (queue, queued, woken)
 }
 
 struct Worker {
@@ -196,21 +227,8 @@ enum Control {
 
 impl Worker {
     fn start(config: Config) -> Option<Self> {
-        let (spans, receiver) = unbounded();
-        let queued = Arc::new(AtomicUsize::new(0));
-        let (batch_full, woken) = bounded(1);
+        let (queue, queued, woken) = queue(config.max_queue_size, config.max_export_batch_size);
         let (control, requests) = unbounded();
-        let queue = Queue {
-            spans,
-            queued: Arc::clone(&queued),
-            max_queue_size: config.max_queue_size,
-            max_export_batch_size: config.max_export_batch_size,
-            batch_full,
-        };
-        let queued = Queued {
-            spans: receiver,
-            queued,
-        };
         let thread = thread::Builder::new()
             .name("fastotel-export".to_owned())
             .spawn(move || run(&config, &queued, &woken, &requests))
@@ -268,9 +286,8 @@ fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiv
                 }
                 // A full batch leaves at once, and the delay starts over as after any export
                 if queued.len() >= batch_size {
-                    while queued.len() >= batch_size {
-                        export(&agent, config, queued, batch_size);
-                    }
+                    // Until less than a batch is left, or what is left is still being pushed
+                    while queued.len() >= batch_size && export(&agent, config, queued, batch_size) > 0 {}
                     next_export = after_delay();
                 }
             },
@@ -296,14 +313,15 @@ fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiv
     }
 }
 
-/// Send the next `count` queued spans in requests of at most the batch size.
-fn export(agent: &Agent, config: &Config, queued: &Queued, mut count: usize) {
-    while count > 0 {
-        let spans = queued.take(count.min(config.max_export_batch_size));
-        count -= spans.len();
+/// Send up to `count` queued spans in requests of at most the batch size; the number taken from the queue.
+fn export(agent: &Agent, config: &Config, queued: &Queued, count: usize) -> usize {
+    let mut taken = 0;
+    while taken < count {
+        let spans = queued.take((count - taken).min(config.max_export_batch_size));
         if spans.is_empty() {
-            return;
+            break;
         }
+        taken += spans.len();
         let body = encode(spans).encode_to_vec();
         let sent = agent
             .post(&config.endpoint)
@@ -314,5 +332,82 @@ fn export(agent: &Agent, config: &Config, queued: &Queued, mut count: usize) {
             // Reading the body to the end returns the connection to the pool
             let _ = response.into_body().read_to_vec();
         }
+    }
+    taken
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::{Resource, SpanKind, Status, StatusCode};
+
+    fn span() -> SpanData {
+        SpanData {
+            trace_id: 1,
+            span_id: 1,
+            trace_state: String::new(),
+            parent: None,
+            name: "span".to_owned(),
+            kind: SpanKind::Internal,
+            start_time_unix_nano: 1,
+            end_time_unix_nano: 2,
+            attributes: vec![],
+            dropped_attributes_count: 0,
+            events: vec![],
+            dropped_events_count: 0,
+            links: vec![],
+            dropped_links_count: 0,
+            status: Status {
+                code: StatusCode::Unset,
+                message: String::new(),
+            },
+            resource: Arc::new(Resource {
+                attributes: vec![],
+                schema_url: String::new(),
+            }),
+            scope: Arc::new(None),
+        }
+    }
+
+    #[test]
+    fn a_full_queue_refuses_spans_until_the_worker_takes_some() {
+        let (queue, queued, _woken) = queue(3, 2);
+        assert!((0..3).all(|_| queue.push(span())));
+        assert!(!queue.push(span()));
+        assert_eq!(queued.len(), 3);
+
+        assert_eq!(queued.take(2).len(), 2);
+        assert_eq!(queued.len(), 1);
+        assert!(queue.push(span()) && queue.push(span()));
+        assert!(!queue.push(span()));
+        assert_eq!(queued.len(), 3);
+    }
+
+    #[test]
+    fn the_push_that_fills_a_batch_wakes_the_worker() {
+        let (queue, queued, woken) = queue(10, 3);
+        queue.push(span());
+        queue.push(span());
+        assert!(woken.try_recv().is_err());
+        queue.push(span());
+        assert!(woken.try_recv().is_ok());
+        // Not again until the count comes back to a full batch
+        queue.push(span());
+        assert!(woken.try_recv().is_err());
+        queued.take(4);
+        (0..3).for_each(|_| {
+            queue.push(span());
+        });
+        assert!(woken.try_recv().is_ok());
+    }
+
+    #[test]
+    fn take_returns_what_is_sent_without_waiting_for_a_counted_span() {
+        // A push between counting its span and sending it: the worker takes what is there and does not hang
+        let (queue, queued, _woken) = queue(10, 5);
+        queue.push(span());
+        queue.queued.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(queued.take(queued.len()).len(), 1);
+        assert_eq!(queued.len(), 1);
     }
 }

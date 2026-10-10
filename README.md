@@ -68,7 +68,7 @@ value out of range raises `ValueError` from the constructor.
 
 | Argument | Variable | Default | What it does |
 | --- | --- | --- | --- |
-| `max_queue_size` | `OTEL_BSP_MAX_QUEUE_SIZE` | 2048 | spans waiting for export; a span ended while the queue is full is dropped and counted, and `on_end` never blocks |
+| `max_queue_size` | `OTEL_BSP_MAX_QUEUE_SIZE` | 2048 | spans waiting for export; a span ended while the queue is full is dropped and counted (the count is public with #14), and `on_end` never blocks |
 | `max_export_batch_size` | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | 512 | a batch leaves as soon as it is full; at most `max_queue_size` |
 | `schedule_delay_millis` | `OTEL_BSP_SCHEDULE_DELAY` | 5000 | otherwise, what is queued leaves this long after the previous export |
 | `export_timeout_millis` | `OTEL_BSP_EXPORT_TIMEOUT` | 30000 | how long `shutdown()` waits for the last export |
