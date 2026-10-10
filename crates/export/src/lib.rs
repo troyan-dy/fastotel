@@ -10,4 +10,7 @@ mod span;
 
 pub use encode::encode;
 pub use pipeline::{Config, Pipeline};
-pub use span::{Attributes, Resource, Scope, SpanData, SpanKind};
+pub use span::{
+    Attributes, Context, Event, Link, Resource, Scope, SpanData, SpanKind, Status, StatusCode,
+    Value,
+};

@@ -18,6 +18,7 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.sampling import Decision, Sampler, SamplingResult
 from opentelemetry.util._once import Once
 from receiver import FakeReceiver
+from spans import end_every_kind_of_span
 
 
 @pytest.fixture
@@ -118,6 +119,15 @@ def test_groups_spans_by_resource_and_scope(receiver: FakeReceiver) -> None:
     ]
     assert grouped == [("cart", [("a", 2), ("b", 1)]), ("payments", [("a", 1)])]
     processor.shutdown()
+
+
+def test_sends_every_kind_of_span(receiver: FakeReceiver) -> None:
+    # test_compatibility.py compares them with the reference; this runs in the lowest job too, with an old SDK
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
+    ended = end_every_kind_of_span(processor)
+    processor.shutdown()
+
+    assert len(receiver.spans()) == ended
 
 
 class _RecordOnly(Sampler):
