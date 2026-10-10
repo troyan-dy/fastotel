@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 use prost::Message;
 use ureq::Agent;
+use ureq::http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::encode::encode;
@@ -17,27 +18,52 @@ use crate::span::SpanData;
 pub struct Config {
     /// The URL spans are posted to, `/v1/traces` included, as the `endpoint` of the reference exporter
     pub endpoint: String,
+    /// Sent with every request, as the reference exporter's `headers`
+    pub headers: HeaderMap,
     /// The spans waiting for export, the batch being sent excluded, as `BatchSpanProcessor` counts them
     pub max_queue_size: usize,
     pub max_export_batch_size: usize,
     pub schedule_delay: Duration,
     /// How long `shutdown` waits for the last export, `OTEL_BSP_EXPORT_TIMEOUT`
     pub export_timeout: Duration,
-    /// The limit for one export request
-    pub timeout: Duration,
+    /// The limit for one export request, `OTEL_EXPORTER_OTLP_TIMEOUT`; None for none
+    pub timeout: Option<Duration>,
 }
 
 impl Config {
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
+            headers: HeaderMap::from_iter([(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/x-protobuf"),
+            )]),
             max_queue_size: 2048,
             max_export_batch_size: 512,
             schedule_delay: Duration::from_millis(5000),
             export_timeout: Duration::from_millis(30000),
-            timeout: Duration::from_secs(10),
+            timeout: Some(Duration::from_secs(10)),
         }
     }
+}
+
+/// Headers from names and values; the error names the first one HTTP cannot carry.
+///
+/// A value may hold any UTF-8 but no control characters: the reference's percent-decoding can produce either.
+pub fn headers<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<HeaderMap, String> {
+    pairs
+        .into_iter()
+        .map(|(name, value)| {
+            Ok((
+                HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| format!("invalid header name {name:?}"))?,
+                HeaderValue::from_bytes(value.as_bytes())
+                    .map_err(|_| format!("invalid value for header {name:?}: {value:?}"))?,
+            ))
+        })
+        .collect()
 }
 
 /// The queue and the worker thread that exports from it.
@@ -258,7 +284,7 @@ impl Worker {
 
 fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiver<Control>) {
     let agent: Agent = Agent::config_builder()
-        .timeout_global(Some(config.timeout))
+        .timeout_global(config.timeout)
         // A status is not an error of the transport: the export reads it
         .http_status_as_error(false)
         // The OS trust store, so corporate CAs work; the reference exporter uses certifi through requests
@@ -323,10 +349,11 @@ fn export(agent: &Agent, config: &Config, queued: &Queued, count: usize) -> usiz
         }
         taken += spans.len();
         let body = encode(spans).encode_to_vec();
-        let sent = agent
-            .post(&config.endpoint)
-            .header("Content-Type", "application/x-protobuf")
-            .send(&body[..]);
+        let mut request = agent.post(&config.endpoint);
+        if let Some(headers) = request.headers_mut() {
+            headers.extend(config.headers.clone());
+        }
+        let sent = request.send(&body[..]);
         // A failed export drops the batch: retries come with #11, counting and logging with #14
         if let Ok(response) = sent {
             // Reading the body to the end returns the connection to the pool
@@ -367,6 +394,17 @@ mod tests {
             }),
             scope: Arc::new(None),
         }
+    }
+
+    #[test]
+    fn headers_refuse_what_http_cannot_carry() {
+        let parsed = headers([("api-key", "secret"), ("x-name", "café")]).unwrap();
+        assert_eq!(parsed["api-key"], "secret");
+        assert_eq!(parsed["x-name"].as_bytes(), "café".as_bytes());
+        assert!(headers([("bad name", "x")]).is_err());
+        assert!(headers([("", "x")]).is_err());
+        assert!(headers([("x", "a\r\nb")]).is_err());
+        assert!(headers([("x", "a\0b")]).is_err());
     }
 
     #[test]

@@ -3,6 +3,7 @@ A fake OTLP/HTTP receiver for the tests: an HTTP server in the test process that
 `opentelemetry-proto`, the way a collector would.
 """
 
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -65,6 +66,11 @@ class _Server(ThreadingHTTPServer):
         # Cleared while the receiver is stalled
         self.answering = threading.Event()
         self.answering.set()
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        # A client that gave up on a stalled answer has closed its connection; anything else is a bug here
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)  # type: ignore[arg-type]
 
 
 class FakeReceiver:

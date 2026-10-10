@@ -10,6 +10,8 @@ class Processor:
     def __new__(
         cls,
         endpoint: str,
+        headers: list[tuple[str, str]],
+        timeout: float,
         max_queue_size: int,
         schedule_delay_millis: float,
         max_export_batch_size: int,
