@@ -35,9 +35,9 @@ untouched.
   meanwhile. Every other status from 400 up (400, 401, 413, 500, 501, ...) and every other error drops the batch.
   Below 400 is success, as there, and redirects are not followed, as the reference sends with
   `allow_redirects=False` (ureq would follow a 302 with a GET carrying the user's headers to another host).
-- **A timeout is not retried**: the request had all the time left. requests' `ConnectTimeout` is a
-  `ConnectionError` the reference resends when time is left, but ureq's clock fires a few milliseconds early on
-  Windows, and the resend would reach a hung collector a second time; a read timeout is not retried there either.
+- **A timeout is not retried**: the request had all the time left. requests' `ConnectTimeout` and `ReadTimeout`
+  are connection errors the reference resends when time is left; here no timeout is resent, since ureq's clock
+  fires a few milliseconds early on Windows, and the resend would reach a hung collector a second time.
 - **`Retry-After`** of a retryable status replaces the backoff, read as the reference reads it: seconds as a float
   (negative is 0; NaN and infinity are ignored) or an HTTP-date (`httpdate`, the three forms of RFC 9110, where
   Python's `parsedate_to_datetime` takes a few more). A `Retry-After` beyond the timeout gives up at once.

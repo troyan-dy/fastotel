@@ -147,6 +147,8 @@ def test_a_shutdown_that_stops_waiting_ends_the_retries_and_the_exports(receiver
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, export_timeout_millis=300, max_export_batch_size=2)
     for i in range(5):
         processor.on_end(_span(f"span {i}"))
+    # The first batch is out before shutdown starts waiting
+    assert len(receiver.wait_for_requests(1)) == 1
     started = time.monotonic()
     processor.shutdown()
     assert time.monotonic() - started < 1
