@@ -29,11 +29,12 @@ class OTLPSpanProcessor(SpanProcessor):
     `on_end` copies the span into Rust and returns; a native thread, started with the first span, batches,
     encodes and sends them without taking the GIL. Only sampled spans are exported, as with `BatchSpanProcessor`.
 
-    `endpoint`, `headers`, `timeout` (seconds, for each request), `compression` and the TLS files are the arguments
-    of `OTLPSpanExporter`, read with its `OTEL_EXPORTER_OTLP_*` variables, precedence and defaults; `endpoint` is
-    the URL spans are posted to, `/v1/traces` included. A batch that fails with a retryable status or a connection
-    error is sent again with exponential backoff, honouring `Retry-After`, until `timeout` has passed. An `https://`
-    endpoint is verified against the OS trust store, or against `certificate_file` when it is given.
+    `endpoint`, `headers`, `timeout` (seconds, for the export of a batch, retries included), `compression` and the
+    TLS files are the arguments of `OTLPSpanExporter`, read with its `OTEL_EXPORTER_OTLP_*` variables, precedence
+    and defaults; `endpoint` is the URL spans are posted to, `/v1/traces` included. A batch that fails with a
+    retryable status or a connection error is sent again with exponential backoff, honouring `Retry-After`, until
+    `timeout` has passed. An `https://` endpoint is verified against the OS trust store, or against
+    `certificate_file` when it is given.
     The other arguments are those of `BatchSpanProcessor`, with its `OTEL_BSP_*` variables, defaults and checks: a
     batch leaves at `max_export_batch_size` spans or `schedule_delay_millis` after the previous export, a span ended
     while `max_queue_size` spans wait is dropped, and `shutdown` waits `export_timeout_millis` for the last export.

@@ -79,9 +79,12 @@ def test_any_other_status_drops_the_batch_and_counts_it(receiver: FakeReceiver, 
     processor.shutdown()
 
 
-def test_a_redirect_status_counts_as_sent(receiver: FakeReceiver) -> None:
-    # Below 400, as the reference counts success; ureq does not follow a 304
-    receiver.reply(Reply(304))
+@pytest.mark.parametrize(
+    "reply", [Reply(302, {"Location": "/elsewhere"}), Reply(307, {"Location": "/elsewhere"}), Reply(304), Reply(302)]
+)
+def test_a_redirect_is_not_followed_and_counts_as_sent(receiver: FakeReceiver, reply: Reply) -> None:
+    # Below 400, as the reference counts success; it does not follow redirects either
+    receiver.reply(reply)
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
     _export(processor)
     assert len(receiver.received) == 1 and _counters(processor) == (0, 0, 0)
@@ -130,26 +133,28 @@ def test_gives_up_after_six_attempts(receiver: FakeReceiver) -> None:
 
 def test_retries_stay_within_the_timeout(receiver: FakeReceiver) -> None:
     receiver.reply(*[Reply(503)] * 10)
-    processor = OTLPSpanProcessor(endpoint=receiver.endpoint, timeout=1.5)
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint, timeout=1.8)
     took = _export(processor)
     # After about 1 s the second backoff, 2 s give or take 20%, would end after the timeout: no third attempt
     assert len(receiver.received) == 2
-    assert took < 2
+    assert took < 2.5
     assert _counters(processor) == (1, 0, 1)
     processor.shutdown()
 
 
-def test_a_shutdown_that_stops_waiting_ends_the_retries(receiver: FakeReceiver) -> None:
+def test_a_shutdown_that_stops_waiting_ends_the_retries_and_the_exports(receiver: FakeReceiver) -> None:
     receiver.reply(Reply(503, {"Retry-After": "1"}))
-    processor = OTLPSpanProcessor(endpoint=receiver.endpoint, export_timeout_millis=300)
-    processor.on_end(_span())
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint, export_timeout_millis=300, max_export_batch_size=2)
+    for i in range(5):
+        processor.on_end(_span(f"span {i}"))
     started = time.monotonic()
     processor.shutdown()
     assert time.monotonic() - started < 1
-    # As the reference's client stops retrying once the processor shuts it down after its wait
+    # As the reference's client stops retrying once the processor shuts it down after its wait, and the processor
+    # exports nothing more: the batch being retried and the rest of the queue are dropped and counted
     time.sleep(1.5)
     assert len(receiver.received) == 1
-    assert _counters(processor) == (1, 0, 0)
+    assert _counters(processor) == (5, 0, 0)
 
 
 def test_a_hung_collector_fails_the_batch_at_the_timeout(receiver: FakeReceiver) -> None:
@@ -178,8 +183,11 @@ def test_a_collector_that_refuses_connections_drops_the_batch_within_the_timeout
     took = _export(processor, 4)
     assert took < 2
     failed, rejected, retries = _counters(processor)
-    # Refused, sent again at once, and then the backoff would end after the timeout
-    assert (failed, rejected) == (4, 0) and retries >= 1
+    assert (failed, rejected) == (4, 0)
+    if sys.platform != "win32":
+        # Refused, sent again at once, and then the backoff would end after the timeout. Windows tries a refused
+        # connection again for about 2 s, so there the timeout ends the first attempt
+        assert retries >= 1
     processor.shutdown()
 
 

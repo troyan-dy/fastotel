@@ -204,6 +204,8 @@ impl Client {
         let agent = Agent::config_builder()
             // A status is not an error of the transport: the export reads it
             .http_status_as_error(false)
+            // The reference does not follow redirects: a 3xx is the answer, and a success
+            .max_redirects(0)
             .tls_config(config.tls.clone())
             .build()
             .into();
@@ -228,8 +230,13 @@ impl Client {
 
     /// Send an encoded batch of `spans` spans, retrying within the timeout; counts what is lost.
     pub(crate) fn send(&mut self, body: Vec<u8>, spans: usize) {
-        let body = self.compression.compress(body);
-        match self.deliver(&body) {
+        // Once shutdown has stopped waiting nothing more is sent, as the reference's processor exports no more
+        let delivered = if self.abandoned() {
+            None
+        } else {
+            self.deliver(&self.compression.compress(body))
+        };
+        match delivered {
             Some(rejected) => {
                 self.counters
                     .rejected
@@ -309,9 +316,12 @@ impl Client {
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| retry_after(value, SystemTime::now()));
                 // The answer to a protobuf request is protobuf; anything else is not read as a response
-                let protobuf = headers
-                    .get(CONTENT_TYPE)
-                    .is_none_or(|value| value.as_bytes().starts_with(b"application/x-protobuf"));
+                let protobuf = headers.get(CONTENT_TYPE).is_none_or(|value| {
+                    value
+                        .as_bytes()
+                        .to_ascii_lowercase()
+                        .starts_with(b"application/x-protobuf")
+                });
                 // Reading the body to the end returns the connection to the pool
                 let answer = response.into_body().read_to_vec();
                 if status < 400 {
@@ -332,9 +342,17 @@ impl Client {
         }
     }
 
+    /// Whether shutdown has stopped waiting, which a request in flight learns only afterwards.
+    fn abandoned(&mut self) -> bool {
+        if !self.abandoned && self.abandon.try_recv().is_ok() {
+            self.abandoned = true;
+        }
+        self.abandoned
+    }
+
     /// False when shutdown has stopped waiting, during the wait or before it.
     fn wait(&mut self, wait: Duration) -> bool {
-        if self.abandoned {
+        if self.abandoned() {
             return false;
         }
         match self.abandon.recv_timeout(wait) {
@@ -364,7 +382,8 @@ fn backoff(attempt: u32, unit: f64) -> Duration {
     Duration::from_secs_f64(f64::from(1u32 << attempt) * (1.0 - JITTER + 2.0 * JITTER * unit))
 }
 
-/// A number in [0, 1): `RandomState` has fresh random keys every time, which is all a jitter needs.
+/// A number in [0, 1): each `RandomState` hashes with other keys, random per thread and then counted up, which
+/// is all a jitter needs.
 fn random() -> f64 {
     let bits = RandomState::new().build_hasher().finish();
     (bits >> 11) as f64 / (1u64 << 53) as f64
@@ -384,12 +403,12 @@ fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
 }
 
 /// The errors the reference retries: those requests raises as a `ConnectionError`, which covers refused and
-/// dropped connections, DNS and TLS failures; a timeout leaves no time to retry anyway.
+/// dropped connections, DNS and TLS failures. Not a timeout: the request had all the time left, and resending at
+/// once on a clock that fires a little early would reach a hung collector twice.
 fn unreachable(error: &Error) -> bool {
     matches!(
         error,
         Error::Io(_)
-            | Error::Timeout(_)
             | Error::HostNotFound
             | Error::ConnectionFailed
             | Error::Protocol(_)

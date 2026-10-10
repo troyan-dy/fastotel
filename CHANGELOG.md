@@ -11,8 +11,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Retries (#11): a batch answered with 429, 502, 503 or 504, or that meets a connection error, is sent again with
-  exponential backoff and jitter or after the answer's `Retry-After`, at most 6 times and within `timeout`, as the
-  reference `OTLPSpanExporter` does; a shutdown that stops waiting ends them. Other errors drop the batch.
+  exponential backoff and jitter or after the answer's `Retry-After`, in at most 6 attempts and within `timeout`,
+  as the reference `OTLPSpanExporter` does; a shutdown that stops waiting ends them and drops what is left. Other
+  errors drop the batch; redirects are not followed.
 - `compression` applies: `gzip` and `deflate` bodies with `Content-Encoding`, unless the headers carry one.
 - The TLS files apply to an `https://` endpoint: `certificate_file` replaces the OS trust store, and
   `client_certificate_file` with `client_key_file` gives mTLS, all through rustls. A file that cannot be read or

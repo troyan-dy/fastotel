@@ -33,14 +33,21 @@ untouched.
   a refused or dropped connection, DNS, a broken HTTP answer and, as requests' `SSLError` is one, TLS failures. A
   connection error is first resent once at once, as the reference does for a pooled connection the collector closed
   meanwhile. Every other status from 400 up (400, 401, 413, 500, 501, ...) and every other error drops the batch.
-  Below 400 is success, as there.
+  Below 400 is success, as there, and redirects are not followed, as the reference sends with
+  `allow_redirects=False` (ureq would follow a 302 with a GET carrying the user's headers to another host).
+- **A timeout is not retried**: the request had all the time left. requests' `ConnectTimeout` is a
+  `ConnectionError` the reference resends when time is left, but ureq's clock fires a few milliseconds early on
+  Windows, and the resend would reach a hung collector a second time; a read timeout is not retried there either.
 - **`Retry-After`** of a retryable status replaces the backoff, read as the reference reads it: seconds as a float
   (negative is 0; NaN and infinity are ignored) or an HTTP-date (`httpdate`, the three forms of RFC 9110, where
   Python's `parsedate_to_datetime` takes a few more). A `Retry-After` beyond the timeout gives up at once.
 - **Shutdown** ends the retries once it stops waiting (`export_timeout_millis`), as the reference's processor
   shuts its exporter down after its wait: `Pipeline::shutdown` sends the worker a message that interrupts a wait,
-  and from then on every batch gets one attempt. A pipeline dropped without shutdown keeps its waits.
-- The random jitter comes from `RandomState`, whose keys are fresh each time: no RNG crate for one number per retry.
+  and from then on nothing more is sent, as the reference's processor exports no more once its wait is over; the
+  batch in hand and what is left in the queue are dropped and counted. A request in flight runs to its end. A
+  pipeline dropped without shutdown keeps its waits.
+- The random jitter comes from `RandomState`, whose keys are random per thread and counted up with each one: no
+  RNG crate for one number per retry.
 
 ### What is counted, and what is not logged yet
 

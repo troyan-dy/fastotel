@@ -85,8 +85,9 @@ carry raises `ValueError`, `compression` also takes a string) is in
 ### Delivery
 
 As the OTLP/HTTP specification asks and `OTLPSpanExporter` does: a batch answered with 429, 502, 503 or 504, or
-that meets a connection error (refused, dropped, DNS, TLS), is sent again after 1, 2, 4, 8 s, give or take 20%, or
-after the answer's `Retry-After`, at most 6 times and only while `timeout` lasts; any other error drops the batch.
+that meets a connection error (refused, dropped, DNS, TLS), is sent again after 1, 2, 4, 8, 16 s, give or take 20%,
+or after the answer's `Retry-After`, in at most 6 attempts and only while `timeout` lasts; any other error drops
+the batch, and a redirect is not followed and counts as sent.
 The spans of a dropped batch and those a collector rejects in a partial success are counted (the counts are public
 with #14). Connections are reused across exports. While the collector is down, a batch costs at most `timeout`,
 mostly asleep, and the queue keeps memory bounded; exports resume with the next batch once it is back.

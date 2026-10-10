@@ -29,6 +29,7 @@ pub struct Config {
     /// The limit for the export of a batch, retries included, `OTEL_EXPORTER_OTLP_TIMEOUT`; zero fails every
     /// export
     pub timeout: Duration,
+    /// Of the request body, `OTEL_EXPORTER_OTLP_COMPRESSION`
     pub compression: Compression,
     /// Built by [`tls`](crate::tls) from the TLS files; an `http://` endpoint does not use it
     pub tls: TlsConfig,
@@ -148,7 +149,7 @@ impl Pipeline {
     }
 
     /// Export what is queued and stop the worker; spans pushed afterwards are ignored. False when the export
-    /// takes longer than `timeout`, and then the worker finishes it on its own, without retrying any more.
+    /// takes longer than `timeout`, and then the worker stops retrying and drops, counted, what it has not sent.
     pub fn shutdown(&self, timeout: Duration) -> bool {
         if self.shut_down.swap(true, Ordering::AcqRel) {
             return true;
@@ -376,10 +377,10 @@ fn export(client: &mut Client, config: &Config, queued: &Queued, count: usize) -
         if spans.is_empty() {
             break;
         }
-        taken += spans.len();
-        let count = spans.len();
+        let batch_size = spans.len();
+        taken += batch_size;
         // A batch that fails after its retries is dropped and counted; logging it comes with #14
-        client.send(encode(spans).encode_to_vec(), count);
+        client.send(encode(spans).encode_to_vec(), batch_size);
     }
     taken
 }
