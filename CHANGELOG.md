@@ -6,6 +6,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-10
+
+### Added
+
+- Retries (#11): a batch answered with 429, 502, 503 or 504, or that meets a connection error, is sent again with
+  exponential backoff and jitter or after the answer's `Retry-After`, at most 6 times and within `timeout`, as the
+  reference `OTLPSpanExporter` does; a shutdown that stops waiting ends them. Other errors drop the batch.
+- `compression` applies: `gzip` and `deflate` bodies with `Content-Encoding`, unless the headers carry one.
+- The TLS files apply to an `https://` endpoint: `certificate_file` replaces the OS trust store, and
+  `client_certificate_file` with `client_key_file` gives mTLS, all through rustls. A file that cannot be read or
+  holds no usable certificate or key raises from the constructor.
+- The spans of dropped batches, the spans a partial success rejects and the retries are counted, for `stats()` in
+  #14.
+- `docs/adr/0006-production-transport.md`: the retries, compression and TLS, and where they differ from the
+  reference.
+
+### Changed
+
+- `timeout` bounds the export of a batch, retries included, rather than a single request.
+
 ## [0.7.0] - 2026-10-10
 
 ### Added
@@ -101,7 +121,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/troyan-dy/fastotel/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/troyan-dy/fastotel/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/troyan-dy/fastotel/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/troyan-dy/fastotel/compare/v0.4.0...v0.5.0
