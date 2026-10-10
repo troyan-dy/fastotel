@@ -1,13 +1,15 @@
 [project]
 name = "fastotel"
-version = "0.3.0"
+version = "0.4.0"
 description = "A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Dmitriy Troyan" }]
 requires-python = ">=3.11"
-dependencies = []
+# The oldest versions the tests pass with, checked by the lowest job of CI: ReadableSpan.instrumentation_scope is
+# there from 1.11, and before 1.16 the API needs pkg_resources, which setuptools no longer ships
+dependencies = ["opentelemetry-api>=1.16", "opentelemetry-sdk>=1.16"]
 keywords = ["opentelemetry", "otel", "otlp", "tracing", "observability", "rust", "pyo3"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -45,6 +47,8 @@ bench = [
 dev = [
   "maturin>=1.15,<2",
   "mypy>=1.13",
+  # The fake OTLP receiver of the tests decodes requests with it
+  "opentelemetry-proto>=1.45",
   "pytest>=8.3",
   "ruff>=0.8",
 ]
@@ -61,7 +65,14 @@ exclude = [{ path = "CLAUDE.md", format = "sdist" }, { path = "docs/agents/**/*"
 
 [tool.uv]
 # uv rebuilds the extension when the Rust sources change, not only the Python metadata
-cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }, { file = "src/**/*.rs" }]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "Cargo.lock" },
+  { file = "src/**/*.rs" },
+  { file = "crates/**/Cargo.toml" },
+  { file = "crates/**/*.rs" },
+]
 
 [tool.ruff]
 line-length = 120

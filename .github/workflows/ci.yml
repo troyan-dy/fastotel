@@ -40,6 +40,23 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest
 
+  lowest:
+    # The lower bounds of pyproject.toml hold: the tests pass with the oldest versions they allow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: >-
+          uv run --isolated --no-project --python 3.11 --resolution lowest-direct
+          --with . --with "pytest>=8.3" --with "opentelemetry-proto>=1.45" pytest
+
+  rust:
+    # The export pipeline is a crate of its own, tested without Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo test --locked --workspace
+
   bench:
     # The harness of make bench, one value per benchmark; the measurements themselves need a quiet machine
     runs-on: ubuntu-latest

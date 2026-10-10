@@ -1,0 +1,15 @@
+[package]
+name = "fastotel-export"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The export pipeline of fastotel: batching, OTLP encoding and sending, with no access to Python"
+
+[dependencies]
+crossbeam-channel = "0.5"
+# The generated OTLP types are checked in to the crate, so the build needs no protoc
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
+# rustls with ring and the OS trust store, never OpenSSL: the wheels build on musl and Windows arm64 with no
+# system libraries
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }

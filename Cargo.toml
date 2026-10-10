@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/export"]
+
 [package]
 name = "fastotel"
 # The package version lives in pyproject.toml; this crate is not published on its own
@@ -8,7 +11,11 @@ publish = false
 [lib]
 name = "_fastotel"
 crate-type = ["cdylib"]
+# A test binary would link libpython; the Python tests cover this crate
+test = false
+doctest = false
 
 [dependencies]
+fastotel-export = { path = "crates/export" }
 # One wheel per platform for every CPython from 3.11 on, through the stable ABI
 pyo3 = { version = "0.29", features = ["abi3-py311"] }

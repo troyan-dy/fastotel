@@ -1,1 +1,13 @@
 # The native module built from src/lib.rs
+
+from opentelemetry.sdk.trace import ReadableSpan
+
+class Processor:
+    """
+    The native half of `OTLPSpanProcessor`: copies spans and hands them to the export pipeline.
+    """
+
+    def __new__(cls, endpoint: str) -> Processor: ...
+    def on_end(self, span: ReadableSpan) -> None: ...
+    def force_flush(self, timeout_millis: int) -> bool: ...
+    def shutdown(self) -> bool: ...

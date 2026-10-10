@@ -237,8 +237,12 @@ wheels = [
 
 [[package]]
 name = "fastotel"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
+dependencies = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
+]
 
 [package.dev-dependencies]
 bench = [
@@ -250,11 +254,16 @@ bench = [
 dev = [
     { name = "maturin" },
     { name = "mypy" },
+    { name = "opentelemetry-proto" },
     { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "opentelemetry-api", specifier = ">=1.16" },
+    { name = "opentelemetry-sdk", specifier = ">=1.16" },
+]
 
 [package.metadata.requires-dev]
 bench = [
@@ -266,6 +275,7 @@ bench = [
 dev = [
     { name = "maturin", specifier = ">=1.15,<2" },
     { name = "mypy", specifier = ">=1.13" },
+    { name = "opentelemetry-proto", specifier = ">=1.45" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "ruff", specifier = ">=0.8" },
 ]

@@ -1,0 +1,13 @@
+//! The export pipeline of fastotel: a bounded queue, a worker thread that batches spans, encodes them as OTLP
+//! protobuf and sends them over HTTP.
+//!
+//! This crate does not depend on PyO3, so nothing in it can take the GIL: the extension module copies a span
+//! out of Python into a [`SpanData`] and hands it over, and from then on Python is not involved.
+
+mod encode;
+mod pipeline;
+mod span;
+
+pub use encode::encode;
+pub use pipeline::{Config, Pipeline};
+pub use span::{Attributes, Resource, Scope, SpanData, SpanKind};
