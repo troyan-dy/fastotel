@@ -114,6 +114,30 @@ value out of range raises `ValueError` from the constructor.
 Where this differs from `BatchSpanProcessor` (a full queue drops the newest span rather than the oldest, among
 others) is in [ADR 0004](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0004-batching-and-the-queue.md).
 
+### Flush, shutdown and exit
+
+`force_flush(timeout_millis=30000)` exports every span ended before the call and returns False when that takes
+longer than the timeout (None waits `export_timeout_millis`), and after `shutdown()`, as `BatchSpanProcessor` does.
+`shutdown()` exports what is queued, waiting up to `export_timeout_millis`, stops the worker and is idempotent;
+`on_end` after it does nothing but count the span as dropped.
+
+`TracerProvider` shuts its processors down at exit unless created with `shutdown_on_exit=False`; fastotel adds no
+exit handler of its own, as `BatchSpanProcessor` does not. Its worker is a native thread that the interpreter does
+not wait for, so the process never waits for it beyond that shutdown. Spans still queued when the process ends:
+
+| How the process ends | Spans still queued |
+| --- | --- |
+| normally, `sys.exit` in the main thread, or an uncaught exception, with the provider's exit handler (the default) | exported, waiting up to `export_timeout_millis` for the collector |
+| the same with `TracerProvider(shutdown_on_exit=False)` and no `shutdown()` | lost; exit does not wait |
+| `sys.exit` in another thread | that thread ends; the process goes on and ends as above |
+| `os._exit`, a fatal signal, `SIGKILL` | lost: no exit handler runs |
+
+Daemon threads still ending spans during and after that shutdown are safe: their spans are dropped and counted. A
+Rust panic never reaches the application nor aborts the interpreter: it is caught, counted and logged on the
+`fastotel` logger, losing the span or the batch at hand. Calls from many threads, on free-threaded builds too,
+export each span once or count it as dropped. Details and where this differs from `BatchSpanProcessor` are in
+[ADR 0007](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0007-flush-shutdown-and-exit.md).
+
 ## Development
 
 Needs [uv](https://docs.astral.sh/uv/) and a Rust toolchain ([rustup](https://rustup.rs/)).

@@ -6,6 +6,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-10
+
+### Added
+
+- A Rust panic never reaches the application nor aborts the interpreter (#12): `on_end`, `force_flush` and
+  `shutdown` catch it, count it and log it on the `fastotel` logger; a panic on the worker loses the batch at hand,
+  counted as failed, and is logged at the next flush or shutdown.
+- `force_flush` takes a float or None for `timeout_millis`; None waits `export_timeout_millis`.
+- Spans ended after `shutdown` are counted as dropped, as `BatchSpanProcessor` counts them in its metrics.
+- The README says what happens to spans still queued at exit in each case; tests run each exit in a process of its
+  own, and 32 threads end spans alongside flushes and a shutdown on GIL and free-threaded builds.
+- `docs/adr/0007-flush-shutdown-and-exit.md`: flush, shutdown, exit and panics, and where they differ from
+  `BatchSpanProcessor`.
+
+### Changed
+
+- `force_flush` returns False after `shutdown`, as `BatchSpanProcessor` 1.45 does.
+- `on_end` after `shutdown` no longer copies the span: one atomic load, and the span is counted.
+- `shutdown` closes the queue, so a span ended while it runs is exported or counted as dropped, never lost
+  unnoticed.
+
 ## [0.8.0] - 2026-10-10
 
 ### Added
@@ -122,7 +143,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/troyan-dy/fastotel/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/troyan-dy/fastotel/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/troyan-dy/fastotel/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/troyan-dy/fastotel/compare/v0.5.0...v0.6.0
