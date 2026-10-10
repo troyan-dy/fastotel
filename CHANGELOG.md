@@ -6,6 +6,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-10
+
+### Added
+
+- `fastotel.OTLPSpanProcessor`, a `SpanProcessor` that sends finished spans over OTLP/HTTP protobuf in place of
+  `BatchSpanProcessor` with `OTLPSpanExporter` (#7). `on_end` copies the span into Rust; a native thread, started by
+  the first span, batches, encodes and posts them to `endpoint` (default `http://localhost:4318/v1/traces`) without
+  taking the GIL. This first slice sends the ids, name, kind, times and string attributes of a span, the string
+  attributes of its resource and the name and version of its scope; the other fields, the `OTEL_*` variables,
+  retries and gzip follow in the tickets of #5.
+- `docs/adr/0002-export-pipeline.md`: the crates and the thread model the pipeline is built on.
+- Dependencies on `opentelemetry-api` and `opentelemetry-sdk` 1.16 or newer.
+
 ## [0.3.0] - 2026-10-10
 
 ### Added
@@ -37,7 +50,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/troyan-dy/fastotel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/troyan-dy/fastotel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/troyan-dy/fastotel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/troyan-dy/fastotel/releases/tag/v0.1.0

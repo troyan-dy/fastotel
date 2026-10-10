@@ -19,19 +19,22 @@ lint: ## Run ruff, mypy, cargo fmt and clippy
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run --group bench mypy
-	cargo fmt --check
-	cargo clippy --locked --all-targets -- -D warnings
+	cargo fmt --all --check
+	cargo clippy --locked --workspace --all-targets -- -D warnings
+	@# The worker cannot take the GIL only as long as its crate cannot reach PyO3 (ADR 0002)
+	@! cargo tree --locked -p fastotel-export -e normal | grep -q pyo3 || { echo "fastotel-export depends on PyO3"; exit 1; }
 
 .PHONY: format
 format: ## Autofix lint issues and format the code
 	uv run ruff check --fix .
 	uv run ruff format .
-	cargo fmt
+	cargo fmt --all
 
 .PHONY: test
-test: ## Run tests, those of the benchmark harness too
+test: ## Run tests, those of the export pipeline in Rust and of the benchmark harness too
 	uv run pytest
 	uv run --group bench pytest bench
+	cargo test --locked --workspace
 
 .PHONY: test-all
 test-all: ## Run tests on every supported Python version, free-threaded and pre-release ones too

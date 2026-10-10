@@ -7,8 +7,10 @@
 
 A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path.
 
-> **Status: pre-alpha.** The package is a skeleton: it installs and imports, and nothing replaces the SDK yet.
-> The plan is in [#1](https://github.com/troyan-dy/fastotel/issues/1).
+> **Status: pre-alpha.** `OTLPSpanProcessor` sends spans over OTLP/HTTP, but only some of their fields so far
+> (ids, name, kind, times, string attributes), with no retries, gzip or `OTEL_*` configuration, and a process
+> forked after the first span exports nothing from the child. The road to 1.0 is in
+> [#5](https://github.com/troyan-dy/fastotel/issues/5).
 
 ## Why
 
@@ -37,13 +39,32 @@ Wheels are built for Linux (glibc and musl), macOS and Windows, x86_64 and arm64
 CPython 3.10 reached end of life on 2026-10-01 and is not supported. Free-threaded 3.13t is not supported
 either: it was experimental, and PyO3 builds free-threaded extensions from 3.14 on.
 
+## Usage
+
+fastotel replaces `BatchSpanProcessor` with `OTLPSpanExporter`; the SDK keeps creating spans:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from fastotel import OTLPSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(OTLPSpanProcessor(endpoint="http://localhost:4318/v1/traces"))
+trace.set_tracer_provider(provider)
+```
+
+`endpoint` is the URL spans are posted to, `/v1/traces` included, as for `OTLPSpanExporter`; the one above is the
+default. `on_end` copies the span into Rust and returns; a native thread, started by the first span, batches,
+encodes and sends spans without taking the GIL. As with `BatchSpanProcessor`, only sampled spans are exported, a
+batch leaves at 512 spans or every 5 seconds, and spans beyond a queue of 2048 are dropped.
+
 ## Development
 
 Needs [uv](https://docs.astral.sh/uv/) and a Rust toolchain ([rustup](https://rustup.rs/)).
 
 ```bash
 make install   # build the extension, install the dev dependencies
-make test      # run the tests
+make test      # run the tests, those of the Rust export pipeline (crates/export) too
 make lint      # ruff, mypy, cargo fmt, clippy
 make bench     # what the stock SDK costs an application, on a GIL and a free-threaded build (~30 min)
 ```
