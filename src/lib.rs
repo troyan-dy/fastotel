@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fastotel_export::{
     Attributes, Config, Context, Event, Link, Pipeline, Resource, Scope, SpanData, SpanKind,
@@ -92,15 +92,17 @@ impl Processor {
     }
 }
 
-/// Seconds as the reference exporter takes them, a float: NaN or not positive fails every request at once, as
-/// there; infinite, or too long for the clock to hold, is no limit.
-fn seconds(seconds: f64) -> Option<Duration> {
-    if seconds.is_nan() || seconds <= 0.0 {
-        return Some(Duration::ZERO);
+/// Seconds as the reference exporter takes them, a float. What its requests cannot wait for fails every request
+/// at once, as there: NaN, not positive, or more than a socket timeout holds (2^63 ns, about 292 years), infinity
+/// included.
+fn seconds(seconds: f64) -> Duration {
+    // Below the limit, so that adding the timeout to the clock cannot overflow
+    const MAX_SECONDS: f64 = 9_223_372_036.0;
+    if seconds > 0.0 && seconds < MAX_SECONDS {
+        Duration::from_secs_f64(seconds)
+    } else {
+        Duration::ZERO
     }
-    Duration::try_from_secs_f64(seconds)
-        .ok()
-        .filter(|&timeout| Instant::now().checked_add(timeout).is_some())
 }
 
 /// Milliseconds as the SDK takes them, a float: negative or NaN is no time, too many to hold is forever.

@@ -43,7 +43,7 @@ def _no_variables(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _logged(caplog: pytest.LogCaptureFixture, loggers: tuple[str, ...]) -> list[tuple[int, str]]:
-    return sorted((record.levelno, record.getMessage()) for record in caplog.records if record.name in loggers)
+    return [(record.levelno, record.getMessage()) for record in caplog.records if record.name in loggers]
 
 
 def _reference(caplog: pytest.LogCaptureFixture, kwargs: dict[str, Any]) -> Outcome:
@@ -98,6 +98,13 @@ def _gzip() -> Any:
     return Compression.Gzip
 
 
+def _common_gzip() -> Any:
+    # The other enum the reference takes, that of opentelemetry-exporter-otlp-common
+    from opentelemetry.exporter.otlp.common.http import Compression
+
+    return Compression.GZIP
+
+
 def _no_compression() -> Any:
     from opentelemetry.exporter.otlp.proto.http import Compression
 
@@ -129,6 +136,8 @@ def _no_compression() -> Any:
         ({"OTEL_EXPORTER_OTLP_HEADERS": "café=1"}, {}),
         ({"OTEL_EXPORTER_OTLP_HEADERS": "a=caf%C3%A9"}, {}),
         ({"OTEL_EXPORTER_OTLP_HEADERS": "a=b%2Cc"}, {}),
+        ({"OTEL_EXPORTER_OTLP_HEADERS": "a=%FF"}, {}),
+        ({"OTEL_EXPORTER_OTLP_HEADERS": "User-Agent=env/1,content-type=text/plain"}, {}),
         # Not URL-encoded, which the reference takes anyway
         ({"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer abc def"}, {}),
         # Invalid entries are skipped with a warning
@@ -159,6 +168,7 @@ def _no_compression() -> Any:
         ({"OTEL_EXPORTER_OTLP_COMPRESSION": "gzip", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION": ""}, {}),
         ({"OTEL_EXPORTER_OTLP_COMPRESSION": "brotli"}, {"compression": _gzip}),
         ({"OTEL_EXPORTER_OTLP_COMPRESSION": "gzip"}, {"compression": _no_compression}),
+        ({}, {"compression": _common_gzip}),
         # The TLS files: the argument, the traces variable, the general one
         ({"OTEL_EXPORTER_OTLP_CERTIFICATE": "/ca.pem"}, {}),
         ({"OTEL_EXPORTER_OTLP_CERTIFICATE": "/ca.pem", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE": "/traces-ca.pem"}, {}),
@@ -302,16 +312,27 @@ def test_a_header_http_cannot_carry_raises(
 
 @pytest.mark.parametrize("timeout", [math.nan, -1.0, 0.0, math.inf, 1e300])
 def test_any_float_timeout_is_taken(timeout: float) -> None:
-    # As the reference: none is refused at construction; NaN or not positive fails each request, inf never ends
+    # As by the reference, none is refused at construction
     processor = OTLPSpanProcessor(timeout=timeout)
     assert repr(processor._timeout) == repr(timeout)
     processor.shutdown()
 
 
-@pytest.mark.parametrize("timeout", [0.0, -1.0, math.nan])
-def test_a_timeout_not_positive_fails_each_request_at_once(receiver: FakeReceiver, timeout: float) -> None:
+@pytest.mark.parametrize("timeout", [0.0, -1.0, math.nan, math.inf, 1e10])
+def test_a_timeout_requests_cannot_wait_for_fails_each_request_at_once(receiver: FakeReceiver, timeout: float) -> None:
+    # As with the reference, whose requests cannot set a socket timeout beyond 2^63 ns
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, timeout=timeout)
     processor.on_end(_span())
     assert processor.force_flush()
     processor.shutdown()
     assert receiver.received == []
+
+
+def test_a_long_timeout_is_a_timeout() -> None:
+    # Just under the reference's limit: requests go out
+    with FakeReceiver() as receiver:
+        processor = OTLPSpanProcessor(endpoint=receiver.endpoint, timeout=9e9)
+        processor.on_end(_span())
+        assert processor.force_flush()
+        processor.shutdown()
+        assert len(receiver.received) == 1

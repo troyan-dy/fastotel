@@ -16,9 +16,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   reference's precedence, header parsing and percent-decoding, defaults and warnings, compared with the reference
   in the tests. Headers and the timeout apply to every request; compression and the TLS files are read and applied
   with #11.
-- Requests carry `User-Agent: fastotel/<version>`.
 - `docs/adr/0005-exporter-configuration.md`: how the configuration is read and where fastotel differs from the
   reference: a header HTTP cannot carry raises `ValueError` at construction, and `compression` also takes a string.
+
+### Changed
+
+- Requests carry `User-Agent: fastotel/<version>` instead of ureq's.
+- The request timeout, fixed at 10 s, is now `timeout` or `OTEL_EXPORTER_OTLP_TIMEOUT`.
 
 ## [0.6.0] - 2026-10-10
 

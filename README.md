@@ -8,8 +8,9 @@
 A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path.
 
 > **Status: pre-alpha.** `OTLPSpanProcessor` sends every field of a span over OTLP/HTTP, encoded as
-> `OTLPSpanExporter` encodes it, configured as it is configured, and batches as `BatchSpanProcessor` does, but with
-> no retries, gzip or custom TLS yet, and a process forked after the first span exports nothing from the child. The road to 1.0 is in
+> `OTLPSpanExporter` encodes it, configured as it is configured, and batches as `BatchSpanProcessor` does, but
+> with no retries, gzip or custom TLS yet, and a process forked after the first span exports nothing from the
+> child. The road to 1.0 is in
 > [#5](https://github.com/troyan-dy/fastotel/issues/5).
 
 ## Why
@@ -63,7 +64,8 @@ requests decode to what `OTLPSpanExporter` sends for the same spans; where they 
 The arguments and variables of `OTLPSpanExporter` (`opentelemetry-exporter-otlp-proto-http`), with its defaults,
 precedence and parsing: an argument overrides the `OTEL_EXPORTER_OTLP_TRACES_*` variable, which overrides the
 `OTEL_EXPORTER_OTLP_*` one; an empty variable counts as unset. A timeout or a compression that does not parse gives
-the default and a warning on the `fastotel` logger, as the reference warns.
+the default, and a header entry that does not parse is skipped, each with the reference's warning on the
+`fastotel` logger.
 
 | Argument | Variables | Default | What it does |
 | --- | --- | --- | --- |
@@ -76,8 +78,8 @@ the default and a warning on the `fastotel` logger, as the reference warns.
 | `client_key_file` | `OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_CLIENT_KEY` | none | its key, used only with a client certificate. Read, but applied from #11 |
 
 `OTLPSpanExporter`'s `session`, `max_request_size` and `meter_provider`, and its credential provider variables,
-have no counterpart. Where fastotel differs from the reference (a header that HTTP cannot carry raises
-`ValueError`) is in
+have no counterpart. Where fastotel differs from the reference (its own user agent, a header that HTTP cannot
+carry raises `ValueError`, `compression` also takes a string) is in
 [ADR 0005](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0005-exporter-configuration.md).
 
 ### Batching

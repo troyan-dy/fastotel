@@ -26,8 +26,8 @@ pub struct Config {
     pub schedule_delay: Duration,
     /// How long `shutdown` waits for the last export, `OTEL_BSP_EXPORT_TIMEOUT`
     pub export_timeout: Duration,
-    /// The limit for one export request, `OTEL_EXPORTER_OTLP_TIMEOUT`; None for none
-    pub timeout: Option<Duration>,
+    /// The limit for one export request, `OTEL_EXPORTER_OTLP_TIMEOUT`; zero fails every request
+    pub timeout: Duration,
 }
 
 impl Config {
@@ -42,7 +42,7 @@ impl Config {
             max_export_batch_size: 512,
             schedule_delay: Duration::from_millis(5000),
             export_timeout: Duration::from_millis(30000),
-            timeout: Some(Duration::from_secs(10)),
+            timeout: Duration::from_secs(10),
         }
     }
 }
@@ -60,7 +60,8 @@ pub fn headers<'a>(
                 HeaderName::from_bytes(name.as_bytes())
                     .map_err(|_| format!("invalid header name {name:?}"))?,
                 HeaderValue::from_bytes(value.as_bytes())
-                    .map_err(|_| format!("invalid value for header {name:?}: {value:?}"))?,
+                    // Not the value, which may be a secret
+                    .map_err(|_| format!("invalid value for header {name:?}"))?,
             ))
         })
         .collect()
@@ -284,7 +285,7 @@ impl Worker {
 
 fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiver<Control>) {
     let agent: Agent = Agent::config_builder()
-        .timeout_global(config.timeout)
+        .timeout_global(Some(config.timeout))
         // A status is not an error of the transport: the export reads it
         .http_status_as_error(false)
         // The OS trust store, so corporate CAs work; the reference exporter uses certifi through requests

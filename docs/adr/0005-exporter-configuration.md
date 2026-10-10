@@ -55,9 +55,11 @@ with a real `BatchSpanProcessor`; this follows the same pattern. Nothing here ma
 ### What applies now
 
 - **Headers** are sent with every request, an argument's `content-type` or `user-agent` included.
-- **The timeout** limits each request (ureq's global timeout), in place of the fixed 10 s of ADR 0002. NaN or a value
-  not positive fails each request at once, as the reference's requests fail; infinity, or a duration too long for
-  the clock, is no limit. Retries and their deadline are #11's.
+- **The timeout** limits each request, in place of the fixed 10 s of ADR 0002. It is ureq's global timeout, the
+  whole request from connecting to the last byte of the answer, which is stricter than requests, whose timeout
+  limits each socket operation. What the reference's requests cannot wait for fails each request at once, as
+  there: NaN, a value not positive, or one beyond what a socket timeout holds (2^63 ns, about 292 years: Python
+  raises `OverflowError`), infinity included. Retries and their deadline are #11's.
 - **Compression and the TLS files** are resolved and kept on the processor (`_compression`, `_certificate_file`,
   `_client_key_file`, `_client_certificate_file`) but not passed to the pipeline: #11 wires them, and with them
   the `Content-Encoding` header, which the reference's client adds unless the headers carry one. Until then a
@@ -68,11 +70,18 @@ with a real `BatchSpanProcessor`; this follows the same pattern. Nothing here ma
 
 - **The user agent** is `fastotel/<version>`, where the reference sends `OTel-OTLP-Exporter-Python/<version>`: the
   OTLP specification asks the exporter to name itself. A `User-Agent` header given by the user replaces it, as there.
-- **A header HTTP cannot carry raises `ValueError` at construction**: a name that is not a token (empty, or with a
-  space, which percent-decoding can make: `a%20b=c`), or a value with a control character (`x=a%0Ab`, or an
-  argument with a line break). The reference builds the exporter and then fails every export; fastotel has no way
-  yet to report from the worker (#14), and a configuration that can never send should fail where it is made. A
-  value beyond ASCII (`a=caf%C3%A9`) is sent as UTF-8, where requests would send Latin-1.
+- **Headers are checked by HTTP's rules (RFC 9110), at construction**: a name must be a token and a value must hold
+  no control character but tab; bytes beyond ASCII are allowed and sent as UTF-8. A header that breaks them raises
+  `ValueError`, without its value, which may be a secret: an empty name, a name with a space or a parenthesis
+  (percent-decoding can make one: `a%20b=c`), a value with a line break or a NUL (`x=a%0Ab`). The reference checks
+  other rules, when it sends: requests refuses a line break and leading whitespace in a value, and http.client a
+  value beyond Latin-1, and either fails every export; other names and values go out as they are. So the two sets
+  differ both ways: `a%20b=c` or a NUL goes out from the reference and raises here; `" spaced value "`, `€` or
+  `%FF` (decoded to U+FFFD) fails every export of the reference and goes out from fastotel, and `café` goes out as
+  UTF-8 where requests sends Latin-1. fastotel has no way yet to report from the worker (#14), so what it cannot
+  send fails where it is configured.
+- **Arguments of the wrong type raise `TypeError` at construction**: a header value that is not a `str`
+  (requests would send bytes), a `timeout` that is not a number (the reference fails each export with it).
 - **`compression` also takes a string**, `"gzip"`, `"deflate"` or `"none"` in any case; anything else raises
   `ValueError` with the reference's message, and a value that is neither a string nor an enum with a string value
   raises `TypeError`. The reference takes its two `Compression` enums, which fastotel takes by their value, and
@@ -90,3 +99,7 @@ with a real `BatchSpanProcessor`; this follows the same pattern. Nothing here ma
 - #14 may turn the construction errors for headers into the reference's per-export failures with a log, if that
   proves friendlier; the comparison test then gains those cases.
 - #19 polishes the README table of every argument and variable.
+- The comparison reads private attributes of the reference (`_client`, `_transport._session`, `_compression`), and
+  the wheel tests install the latest reference: when its internals move, the test fails without a change in
+  fastotel, as the compatibility test of ADR 0003 does when its encoding moves. That is the signal to read the new
+  reference and follow it; a red release from it is fixed forward like any other.
