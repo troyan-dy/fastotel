@@ -21,6 +21,8 @@ lint: ## Run ruff, mypy, cargo fmt and clippy
 	uv run --group bench mypy
 	cargo fmt --all --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings
+	@# The worker cannot take the GIL only as long as its crate cannot reach PyO3 (ADR 0002)
+	@! cargo tree --locked -p fastotel-export -e normal | grep -q pyo3 || { echo "fastotel-export depends on PyO3"; exit 1; }
 
 .PHONY: format
 format: ## Autofix lint issues and format the code

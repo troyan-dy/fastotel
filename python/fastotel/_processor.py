@@ -26,4 +26,5 @@ class OTLPSpanProcessor(SpanProcessor):
         self._native.shutdown()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        return self._native.force_flush(timeout_millis)
+        # A negative timeout is an expired one, not an OverflowError from the native side
+        return self._native.force_flush(max(timeout_millis, 0))

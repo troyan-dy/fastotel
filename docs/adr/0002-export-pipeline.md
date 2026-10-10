@@ -22,8 +22,8 @@ shutdown, #13 fork, #14 diagnostics), so the choices here are the ones they buil
 
 - `crates/export` (`fastotel-export`) holds the span model (`SpanData`), the encoder and the pipeline: the queue,
   the worker thread and the HTTP client. **It does not depend on PyO3**, so nothing in it can take the GIL: the
-  compiler checks the first constraint, and a reviewer checks it by reading `crates/export/Cargo.toml`. Its tests
-  run with `cargo test` and no Python.
+  compiler checks the first constraint, and `make lint` fails when the crate's dependency tree reaches PyO3. Its
+  tests run with `cargo test` and no Python.
 - The extension module (`src/lib.rs`) is the only code that touches Python. `Processor.on_end` copies the
   `ReadableSpan` into a `SpanData` (owned Rust data, nothing from Python in it) and pushes it onto the queue with a
   `try_send` that never blocks: that is all it does with the GIL. `force_flush` and `shutdown` release the GIL
@@ -56,9 +56,10 @@ shutdown, #13 fork, #14 diagnostics), so the choices here are the ones they buil
 
 - `ureq` 3, a blocking client with a connection pool, without its default features: `rustls` (rustls with the
   `ring` provider) and `platform-verifier` (`rustls-platform-verifier`, which verifies against the trust store of
-  the OS, so corporate CAs work as with the reference exporter). No OpenSSL, and not `aws-lc-rs`, which needs CMake
-  or NASM on some targets; `ring` builds with the C compiler of the target. `https://` endpoints work with the OS
-  trust store from this release on; `certificate_file`, mTLS and their tests are #11.
+  the OS, so corporate CAs work, as #11 asks; the reference exporter uses certifi through requests instead). No
+  OpenSSL, and not `aws-lc-rs`, which needs CMake or NASM on some targets; `ring` builds with the C compiler of the
+  target. `https://` endpoints are verified against the OS trust store, untested until #11, which also brings
+  `certificate_file` and mTLS.
 - A failed request or a non-2xx answer drops the batch for now: retries are #11, counting and logging #14.
 
 ### Public API
@@ -75,7 +76,13 @@ shutdown, #13 fork, #14 diagnostics), so the choices here are the ones they buil
 
 - Only sampled spans are exported, as by `BatchSpanProcessor`: a span recorded but not sampled reaches `on_end` and
   is ignored there.
-- `on_end` runs inside the application's `span.end()` and never raises: a span it cannot copy is dropped.
+- `on_end` runs inside the application's `span.end()`: a span it cannot copy is dropped instead of raising an
+  `Exception` there; `KeyboardInterrupt` and `SystemExit` still go through.
+- A child forked after the first span inherits the channels of the parent's worker but not its thread. Until #13
+  starts a worker in the child, the pipeline remembers the pid that started it and in another process ignores
+  spans, flushes and shutdowns and leaks the channels rather than dropping them: waking the parent's worker from the
+  child traps in libdispatch on macOS, and on Linux `shutdown()` would wait 30 s for an answer. Spans of such a
+  child are not exported yet; a fork before the first span (gunicorn `--preload` without spans at import) works.
 - The fields of this slice: trace id, span id, parent span id, name, kind, start and end time, string attributes,
   resource attributes, scope name and version. Attributes of other types are left out until #8.
 - A resource or a scope is copied once per Python object, not with every span: the processor keeps up to 64 of
@@ -98,5 +105,5 @@ application (ADR 0001). #18 measures it properly.
   queue drops in `Pipeline::push`.
 - #11 changes `export` in `crates/export/src/pipeline.rs` (gzip, retries) and the `TlsConfig` the worker builds.
 - #13 needs a pipeline it can restart in the child: the `OnceLock` that holds the worker cannot be reset and gives
-  way to a state the fork handlers can replace.
+  way to a state the fork handlers can replace, and the pid check of `Worker::in_this_process` turns into a restart.
 - #14 needs a way for the worker to hand messages to the `fastotel` logger without the GIL; nothing reports yet.

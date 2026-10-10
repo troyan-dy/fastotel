@@ -55,7 +55,7 @@ jobs:
         shell: bash
         run: |
           check() {
-            uv run --isolated --no-project --python "cpython-$1-$PLATFORM" --with pytest --with opentelemetry-proto \
+            uv run --isolated --no-project --python "cpython-$1-$PLATFORM" --with pytest --with "opentelemetry-proto>=1.45" \
               --with "$(ls dist/*-"$2"-*.whl)" \
               pytest -p no:cacheprovider tests
           }

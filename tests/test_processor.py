@@ -1,4 +1,8 @@
+import gc
+import os
+import signal
 import sys
+import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -169,8 +173,9 @@ def test_shutdown_exports_what_is_queued_then_ignores_spans(receiver: FakeReceiv
     assert [span.name for span in receiver.spans()] == ["before"]
 
 
-def _native_threads() -> list[str]:
-    return [comm.read_text().strip() for comm in Path("/proc/self/task").glob("*/comm")]
+def _export_threads() -> int:
+    # Counted rather than looked for: a processor another test left running has a thread of the same name
+    return [comm.read_text().strip() for comm in Path("/proc/self/task").glob("*/comm")].count("fastotel-export")
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the threads of the process from /proc")
@@ -178,14 +183,91 @@ def test_starts_no_thread_before_the_first_span(receiver: FakeReceiver) -> None:
     # A process that forks after creating the processor, as gunicorn --preload does, has no thread to lose
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
     provider = TracerProvider()
+    before = _export_threads()
     provider.add_span_processor(processor)
-    assert "fastotel-export" not in _native_threads()
+    assert _export_threads() == before
 
     provider.get_tracer("app").start_span("span").end()
-    assert "fastotel-export" in _native_threads()
+    assert _export_threads() == before + 1
 
     provider.shutdown()
-    assert "fastotel-export" not in _native_threads()
+    assert _export_threads() == before
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_a_child_forked_after_the_first_span_exits_cleanly(receiver: FakeReceiver) -> None:
+    # The child does not export until #13; it must not crash or hang on the worker it did not inherit
+    provider = TracerProvider()
+    provider.add_span_processor(OTLPSpanProcessor(endpoint=receiver.endpoint))
+    tracer = provider.get_tracer("app")
+    tracer.start_span("parent before").end()
+
+    pid = os.fork()
+    if pid == 0:
+        tracer.start_span("child").end()
+        provider.force_flush()
+        provider.shutdown()
+        os._exit(0)
+    deadline = time.monotonic() + 10
+    while (waited := os.waitpid(pid, os.WNOHANG)) == (0, 0) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if waited == (0, 0):
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        pytest.fail("the child hung")
+    assert os.waitstatus_to_exitcode(waited[1]) == 0
+
+    tracer.start_span("parent after").end()
+    provider.shutdown()
+    assert [span.name for span in receiver.spans()] == ["parent before", "parent after"]
+
+
+def test_splits_what_is_queued_into_batches_of_512(receiver: FakeReceiver) -> None:
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
+    provider = TracerProvider()
+    provider.add_span_processor(processor)
+    tracer = provider.get_tracer("app")
+    for _ in range(1300):
+        tracer.start_span("span").end()
+    provider.shutdown()
+
+    sizes = [len(request.resource_spans[0].scope_spans[0].spans) for request in receiver.requests]
+    assert sorted(sizes) == [276, 512, 512]
+
+
+def test_a_processor_dropped_without_shutdown_exports_what_is_queued(receiver: FakeReceiver) -> None:
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
+    processor.on_end(_ended_span(TracerProvider()))
+    del processor
+    gc.collect()
+
+    deadline = time.monotonic() + 10
+    while not receiver.spans() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(receiver.spans()) == 1
+
+
+def _ended_span(provider: TracerProvider) -> ReadableSpan:
+    span = provider.get_tracer("app").start_span("span")
+    span.end()
+    assert isinstance(span, ReadableSpan)
+    return span
+
+
+def test_on_end_drops_what_it_cannot_copy_without_raising(receiver: FakeReceiver) -> None:
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
+    processor.on_end(object())  # type: ignore[arg-type]
+    processor.on_end(_ended_span(TracerProvider()))
+    processor.shutdown()
+
+    assert len(receiver.spans()) == 1
+
+
+def test_force_flush_with_a_negative_timeout_does_not_raise(receiver: FakeReceiver) -> None:
+    processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
+    processor.force_flush(-1)
+    processor.shutdown()
 
 
 def test_is_a_span_processor_exported_by_the_package() -> None:

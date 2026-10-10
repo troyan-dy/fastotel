@@ -1,3 +1,4 @@
+use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -63,6 +64,7 @@ impl Pipeline {
         if let Some(worker) = self
             .worker
             .get_or_init(|| Worker::start(self.config.clone()))
+            && worker.in_this_process()
         {
             // A full queue drops the span; counting it comes with #9
             let _ = worker.spans.try_send(span);
@@ -72,7 +74,9 @@ impl Pipeline {
     /// Export every span queued so far; false when that takes longer than `timeout`.
     pub fn force_flush(&self, timeout: Duration) -> bool {
         match self.worker.get() {
-            Some(Some(worker)) => worker.request(Control::Flush, timeout),
+            Some(Some(worker)) if worker.in_this_process() => {
+                worker.request(Control::Flush, timeout)
+            }
             _ => true,
         }
     }
@@ -85,7 +89,7 @@ impl Pipeline {
         }
         // Waits for a worker that a concurrent first push is starting, and keeps one from starting later
         match self.worker.get_or_init(|| None) {
-            Some(worker) => {
+            Some(worker) if worker.in_this_process() => {
                 let done = worker.request(Control::Shutdown, timeout);
                 if done && let Some(thread) = worker.thread.lock().expect("never poisoned").take() {
                     // The worker has answered and is returning
@@ -93,12 +97,26 @@ impl Pipeline {
                 }
                 done
             }
-            None => true,
+            _ => true,
+        }
+    }
+}
+
+impl Drop for Pipeline {
+    fn drop(&mut self) {
+        if let Some(Some(worker)) = self.worker.take()
+            && !worker.in_this_process()
+        {
+            // Dropping the channels would wake the worker of the parent, which the child does not have
+            std::mem::forget(worker);
         }
     }
 }
 
 struct Worker {
+    // A child forked after the first span inherits the channels but not the thread. Until #13 restarts the
+    // worker there, the child leaves them alone: waking the parent's worker traps on macOS
+    pid: u32,
     spans: Sender<SpanData>,
     control: Sender<Control>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -119,10 +137,15 @@ impl Worker {
             // Without a thread the spans are dropped; reporting it comes with #14
             .ok()?;
         Some(Self {
+            pid: process::id(),
             spans,
             control,
             thread: Mutex::new(Some(thread)),
         })
+    }
+
+    fn in_this_process(&self) -> bool {
+        self.pid == process::id()
     }
 
     fn request(&self, make: fn(Sender<()>) -> Control, timeout: Duration) -> bool {
@@ -140,7 +163,7 @@ fn run(config: &Config, queued: &Receiver<SpanData>, requests: &Receiver<Control
         .timeout_global(Some(config.timeout))
         // A status is not an error of the transport: the export reads it
         .http_status_as_error(false)
-        // Corporate CAs installed on the machine work, as with the reference exporter
+        // The OS trust store, so corporate CAs work; the reference exporter uses certifi through requests
         .tls_config(
             TlsConfig::builder()
                 .root_certs(RootCerts::PlatformVerifier)

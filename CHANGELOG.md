@@ -17,10 +17,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   attributes of its resource and the name and version of its scope; the other fields, the `OTEL_*` variables,
   retries and gzip follow in the tickets of #5.
 - `docs/adr/0002-export-pipeline.md`: the crates and the thread model the pipeline is built on.
-
-### Changed
-
-- `opentelemetry-api` and `opentelemetry-sdk` 1.16 or newer are dependencies.
+- Dependencies on `opentelemetry-api` and `opentelemetry-sdk` 1.16 or newer.
 
 ## [0.3.0] - 2026-10-10
 

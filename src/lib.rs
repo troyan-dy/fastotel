@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fastotel_export::{Attributes, Config, Pipeline, Resource, Scope, SpanData, SpanKind};
+use pyo3::exceptions::PyException;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
@@ -33,12 +34,16 @@ impl Processor {
         }
     }
 
-    fn on_end(&self, span: &Bound<'_, PyAny>) {
-        // on_end runs inside the application's span.end(): a span that cannot be copied is dropped rather than
-        // raising there; reporting it comes with #14
-        if let Ok(Some(span)) = self.copy(span) {
-            self.pipeline.push(span);
+    fn on_end(&self, span: &Bound<'_, PyAny>) -> PyResult<()> {
+        match self.copy(span) {
+            Ok(Some(span)) => self.pipeline.push(span),
+            Ok(None) => {}
+            // on_end runs inside the application's span.end(): a span that cannot be copied is dropped rather
+            // than raising there, and reporting it comes with #14. KeyboardInterrupt and SystemExit go through
+            Err(error) if error.is_instance_of::<PyException>(span.py()) => {}
+            Err(error) => return Err(error),
         }
+        Ok(())
     }
 
     fn force_flush(&self, py: Python<'_>, timeout_millis: u64) -> bool {
@@ -171,7 +176,8 @@ impl<T> Copies<T> {
         // for it with the GIL
         let copied = Arc::new(copy(object)?);
         let mut entries = self.entries.lock().expect("never poisoned");
-        if entries.len() < MAX_CACHED {
+        // Another thread may have copied it meanwhile
+        if entries.len() < MAX_CACHED && !entries.iter().any(|(cached, _)| cached.is(object)) {
             entries.push((object.clone().unbind(), Arc::clone(&copied)));
         }
         Ok(copied)

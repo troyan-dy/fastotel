@@ -8,8 +8,9 @@
 A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path.
 
 > **Status: pre-alpha.** `OTLPSpanProcessor` sends spans over OTLP/HTTP, but only some of their fields so far
-> (ids, name, kind, times, string attributes), with no retries, gzip or `OTEL_*` configuration. The road to 1.0 is
-> in [#5](https://github.com/troyan-dy/fastotel/issues/5).
+> (ids, name, kind, times, string attributes), with no retries, gzip or `OTEL_*` configuration, and a process
+> forked after the first span exports nothing from the child. The road to 1.0 is in
+> [#5](https://github.com/troyan-dy/fastotel/issues/5).
 
 ## Why
 
