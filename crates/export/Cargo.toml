@@ -7,9 +7,15 @@ description = "The export pipeline of fastotel: batching, OTLP encoding and send
 
 [dependencies]
 crossbeam-channel = "0.5"
+# gzip and deflate of the request body, in pure Rust (miniz_oxide)
+flate2 = "1"
+# The HTTP-date form of Retry-After
+httpdate = "1"
 # The generated OTLP types are checked in to the crate, so the build needs no protoc
 opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "trace"] }
 prost = "0.14"
+# The one ureq uses, to check a client certificate against its key before the worker meets it; ring, as there
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # rustls with ring and the OS trust store, never OpenSSL: the wheels build on musl and Windows arm64 with no
 # system libraries
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }

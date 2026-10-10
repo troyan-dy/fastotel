@@ -1,17 +1,17 @@
 use std::process;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 use prost::Message;
-use ureq::Agent;
 use ureq::http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::encode::encode;
 use crate::span::SpanData;
+use crate::transport::{Client, Compression, Counters};
 
 /// How the pipeline batches and where it sends; the defaults are the SDK's.
 #[derive(Debug, Clone)]
@@ -26,8 +26,12 @@ pub struct Config {
     pub schedule_delay: Duration,
     /// How long `shutdown` waits for the last export, `OTEL_BSP_EXPORT_TIMEOUT`
     pub export_timeout: Duration,
-    /// The limit for one export request, `OTEL_EXPORTER_OTLP_TIMEOUT`; zero fails every request
+    /// The limit for the export of a batch, retries included, `OTEL_EXPORTER_OTLP_TIMEOUT`; zero fails every
+    /// export
     pub timeout: Duration,
+    pub compression: Compression,
+    /// Built by [`tls`](crate::tls) from the TLS files; an `http://` endpoint does not use it
+    pub tls: TlsConfig,
 }
 
 impl Config {
@@ -43,6 +47,11 @@ impl Config {
             schedule_delay: Duration::from_millis(5000),
             export_timeout: Duration::from_millis(30000),
             timeout: Duration::from_secs(10),
+            compression: Compression::None,
+            // The OS trust store, so corporate CAs work; the reference exporter uses certifi through requests
+            tls: TlsConfig::builder()
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
         }
     }
 }
@@ -75,7 +84,7 @@ pub struct Pipeline {
     // None once shut down before the first span, or when the thread could not be started
     worker: OnceLock<Option<Worker>>,
     shut_down: AtomicBool,
-    dropped: AtomicU64,
+    counters: Arc<Counters>,
 }
 
 impl Pipeline {
@@ -84,7 +93,7 @@ impl Pipeline {
             config,
             worker: OnceLock::new(),
             shut_down: AtomicBool::new(false),
-            dropped: AtomicU64::new(0),
+            counters: Arc::default(),
         }
     }
 
@@ -100,17 +109,32 @@ impl Pipeline {
         }
         if let Some(worker) = self
             .worker
-            .get_or_init(|| Worker::start(self.config.clone()))
+            .get_or_init(|| Worker::start(self.config.clone(), Arc::clone(&self.counters)))
             && worker.in_this_process()
             && !worker.queue.push(span)
         {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.counters.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// The spans dropped so far because the queue was full.
     pub fn dropped_spans(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
+        self.counters.dropped.load(Ordering::Relaxed)
+    }
+
+    /// The spans of batches dropped so far because their export failed, retries and all.
+    pub fn failed_spans(&self) -> u64 {
+        self.counters.failed.load(Ordering::Relaxed)
+    }
+
+    /// The spans the collector has rejected in partial successes so far.
+    pub fn rejected_spans(&self) -> u64 {
+        self.counters.rejected.load(Ordering::Relaxed)
+    }
+
+    /// The requests sent again so far.
+    pub fn retries(&self) -> u64 {
+        self.counters.retries.load(Ordering::Relaxed)
     }
 
     /// Export every span queued so far; false when that takes longer than `timeout`.
@@ -124,7 +148,7 @@ impl Pipeline {
     }
 
     /// Export what is queued and stop the worker; spans pushed afterwards are ignored. False when the export
-    /// takes longer than `timeout`, and then the worker finishes it on its own.
+    /// takes longer than `timeout`, and then the worker finishes it on its own, without retrying any more.
     pub fn shutdown(&self, timeout: Duration) -> bool {
         if self.shut_down.swap(true, Ordering::AcqRel) {
             return true;
@@ -133,7 +157,10 @@ impl Pipeline {
         match self.worker.get_or_init(|| None) {
             Some(worker) if worker.in_this_process() => {
                 let done = worker.request(Control::Shutdown, timeout);
-                if done && let Some(thread) = worker.thread.lock().expect("never poisoned").take() {
+                if !done {
+                    // As the reference shuts its exporter down once the wait is over, which ends its retries
+                    let _ = worker.abandon.try_send(());
+                } else if let Some(thread) = worker.thread.lock().expect("never poisoned").take() {
                     // The worker has answered and is returning
                     let _ = thread.join();
                 }
@@ -244,6 +271,8 @@ struct Worker {
     pid: u32,
     queue: Queue,
     control: Sender<Control>,
+    // Tells the worker to stop retrying, once shutdown has stopped waiting for it
+    abandon: Sender<()>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -253,18 +282,23 @@ enum Control {
 }
 
 impl Worker {
-    fn start(config: Config) -> Option<Self> {
+    fn start(config: Config, counters: Arc<Counters>) -> Option<Self> {
         let (queue, queued, woken) = queue(config.max_queue_size, config.max_export_batch_size);
         let (control, requests) = unbounded();
+        let (abandon, abandoned) = bounded(1);
         let thread = thread::Builder::new()
             .name("fastotel-export".to_owned())
-            .spawn(move || run(&config, &queued, &woken, &requests))
+            .spawn(move || {
+                let mut client = Client::new(&config, counters, abandoned);
+                run(&config, &mut client, &queued, &woken, &requests);
+            })
             // Without a thread the spans are dropped; reporting it comes with #14
             .ok()?;
         Some(Self {
             pid: process::id(),
             queue,
             control,
+            abandon,
             thread: Mutex::new(Some(thread)),
         })
     }
@@ -283,19 +317,13 @@ impl Worker {
     }
 }
 
-fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiver<Control>) {
-    let agent: Agent = Agent::config_builder()
-        .timeout_global(Some(config.timeout))
-        // A status is not an error of the transport: the export reads it
-        .http_status_as_error(false)
-        // The OS trust store, so corporate CAs work; the reference exporter uses certifi through requests
-        .tls_config(
-            TlsConfig::builder()
-                .root_certs(RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .build()
-        .into();
+fn run(
+    config: &Config,
+    client: &mut Client,
+    queued: &Queued,
+    woken: &Receiver<()>,
+    requests: &Receiver<Control>,
+) {
     let batch_size = config.max_export_batch_size;
     // None when the delay is too long to tell the time it ends: then only full batches and flushes export
     let after_delay = || Instant::now().checked_add(config.schedule_delay);
@@ -308,19 +336,19 @@ fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiv
             recv(woken) -> woken => {
                 if woken.is_err() {
                     // The pipeline is dropped
-                    export(&agent, config, queued, queued.len());
+                    export(client, config, queued, queued.len());
                     return;
                 }
                 // A full batch leaves at once, and the delay starts over as after any export
                 if queued.len() >= batch_size {
                     // Until less than a batch is left, or what is left is still being pushed
-                    while queued.len() >= batch_size && export(&agent, config, queued, batch_size) > 0 {}
+                    while queued.len() >= batch_size && export(client, config, queued, batch_size) > 0 {}
                     next_export = after_delay();
                 }
             },
             recv(requests) -> request => {
                 // Everything pushed before the request is counted by now
-                export(&agent, config, queued, queued.len());
+                export(client, config, queued, queued.len());
                 match request {
                     Ok(Control::Flush(done)) => {
                         let _ = done.send(());
@@ -333,7 +361,7 @@ fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiv
                 }
             },
             default(wait) => {
-                export(&agent, config, queued, queued.len());
+                export(client, config, queued, queued.len());
                 next_export = after_delay();
             },
         }
@@ -341,7 +369,7 @@ fn run(config: &Config, queued: &Queued, woken: &Receiver<()>, requests: &Receiv
 }
 
 /// Send up to `count` queued spans in requests of at most the batch size; the number taken from the queue.
-fn export(agent: &Agent, config: &Config, queued: &Queued, count: usize) -> usize {
+fn export(client: &mut Client, config: &Config, queued: &Queued, count: usize) -> usize {
     let mut taken = 0;
     while taken < count {
         let spans = queued.take((count - taken).min(config.max_export_batch_size));
@@ -349,17 +377,9 @@ fn export(agent: &Agent, config: &Config, queued: &Queued, count: usize) -> usiz
             break;
         }
         taken += spans.len();
-        let body = encode(spans).encode_to_vec();
-        let mut request = agent.post(&config.endpoint);
-        if let Some(headers) = request.headers_mut() {
-            headers.extend(config.headers.clone());
-        }
-        let sent = request.send(&body[..]);
-        // A failed export drops the batch: retries come with #11, counting and logging with #14
-        if let Ok(response) = sent {
-            // Reading the body to the end returns the connection to the pool
-            let _ = response.into_body().read_to_vec();
-        }
+        let count = spans.len();
+        // A batch that fails after its retries is dropped and counted; logging it comes with #14
+        client.send(encode(spans).encode_to_vec(), count);
     }
     taken
 }

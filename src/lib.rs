@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fastotel_export::{
-    Attributes, Config, Context, Event, Link, Pipeline, Resource, Scope, SpanData, SpanKind,
-    Status, StatusCode, Value,
+    Attributes, Compression, Config, Context, Event, Link, Pipeline, Resource, Scope, SpanData,
+    SpanKind, Status, StatusCode, Value,
 };
 use pyo3::exceptions::{PyAttributeError, PyException, PyTypeError, PyValueError};
 use pyo3::intern;
@@ -27,12 +27,18 @@ struct Processor {
 #[pymethods]
 impl Processor {
     /// The arguments are checked and defaulted by `OTLPSpanProcessor`, as `BatchSpanProcessor` and
-    /// `OTLPSpanExporter` check them; a header HTTP cannot carry raises `ValueError` here, not at every export.
+    /// `OTLPSpanExporter` check them; a header HTTP cannot carry, or a TLS file that holds no usable
+    /// certificate or key, raises `ValueError` here, not at every export. The TLS files come as their contents.
     #[new]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: String,
         headers: Vec<(String, String)>,
         timeout: f64,
+        compression: &str,
+        certificate: Option<Vec<u8>>,
+        client_certificate: Option<Vec<u8>>,
+        client_key: Option<Vec<u8>>,
         max_queue_size: usize,
         schedule_delay_millis: f64,
         max_export_batch_size: usize,
@@ -44,9 +50,19 @@ impl Processor {
                 .map(|(name, value)| (name.as_str(), value.as_str())),
         )
         .map_err(PyValueError::new_err)?;
+        let compression = Compression::from_name(compression)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown compression {compression:?}")))?;
+        let tls = fastotel_export::tls(
+            certificate.as_deref(),
+            client_certificate.as_deref(),
+            client_key.as_deref(),
+        )
+        .map_err(PyValueError::new_err)?;
         let config = Config {
             headers,
             timeout: seconds(timeout),
+            compression,
+            tls,
             max_queue_size,
             max_export_batch_size,
             schedule_delay: millis(schedule_delay_millis),
@@ -86,9 +102,24 @@ impl Processor {
         })
     }
 
-    /// The spans dropped so far because the queue was full; `stats()` exposes it with #14.
+    /// The spans dropped so far because the queue was full; `stats()` exposes the counters with #14.
     fn dropped_spans(&self) -> u64 {
         self.pipeline.dropped_spans()
+    }
+
+    /// The spans of batches dropped so far because their export failed.
+    fn failed_spans(&self) -> u64 {
+        self.pipeline.failed_spans()
+    }
+
+    /// The spans the collector has rejected in partial successes so far.
+    fn rejected_spans(&self) -> u64 {
+        self.pipeline.rejected_spans()
+    }
+
+    /// The requests sent again so far.
+    fn retries(&self) -> u64 {
+        self.pipeline.retries()
     }
 }
 

@@ -53,6 +53,8 @@ dev = [
   "opentelemetry-proto>=1.45",
   "pytest>=8.3",
   "ruff>=0.8",
+  # Certificates for the TLS tests, made in the test; cryptography has no wheels for the 3.15 pre-releases
+  "trustme>=1.2 ; python_full_version < '3.15'",
   "types-protobuf>=5",
 ]
 
