@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
-      - run: uv sync --locked
+      - run: uv sync --locked --group bench
       - run: make lint
 
   test:
@@ -39,6 +39,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked
       - run: uv run pytest
+
+  bench:
+    # The harness of make bench, one value per benchmark; the measurements themselves need a quiet machine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv sync --locked --group bench
+      - run: uv run pytest bench
 
   wheels:
     # Release builds the same wheels; a pull request finds out first

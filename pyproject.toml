@@ -35,6 +35,13 @@ Issues = "https://github.com/troyan-dy/fastotel/issues"
 Changelog = "https://github.com/troyan-dy/fastotel/blob/master/CHANGELOG.md"
 
 [dependency-groups]
+# make bench: what the stock SDK costs (bench/)
+bench = [
+  "opentelemetry-api>=1.45",
+  "opentelemetry-exporter-otlp-proto-http>=1.45",
+  "opentelemetry-sdk>=1.45",
+  "pyperf>=2.10",
+]
 dev = [
   "maturin>=1.15,<2",
   "mypy>=1.13",
@@ -65,8 +72,13 @@ select = ["E", "W", "F", "I", "N", "B", "A", "UP", "S", "RUF"]
 ignore = ["S101"]
 
 [tool.mypy]
-files = ["python", "tests", "scripts"]
+files = ["python", "tests", "scripts", "bench"]
 strict = true
+
+[[tool.mypy.overrides]]
+# pyperf ships no type hints
+module = ["pyperf"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

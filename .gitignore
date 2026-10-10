@@ -9,6 +9,8 @@ target/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+# make bench
+.bench/
 .DS_Store
 .idea/
 .vscode/
