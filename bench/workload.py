@@ -33,7 +33,7 @@ def hot_path(loops: int, tracer: Tracer) -> float:
 
 def work() -> int:
     """
-    One unit of the CPU-bound workload, about 10 µs of pure Python on an Apple M2.
+    One unit of the CPU-bound workload, about 9 µs of pure Python on an Apple M2 Pro.
     """
     total = 0
     for i in range(300):

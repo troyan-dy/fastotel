@@ -1,18 +1,24 @@
 """
-The local OTLP/HTTP receiver of the benchmarks: accepts `POST /v1/traces`, discards the body, answers 200.
+The local OTLP/HTTP receiver of the benchmarks: accepts `POST /v1/traces`, answers 200 and counts the spans.
 
 It runs in its own process, so its work never competes with the benchmark for the GIL:
 
     python -m bench.sink    serve on a free port of 127.0.0.1 and print the port on the first line
+
+`GET /stats` returns the requests, bytes and spans received so far.
 """
 
 import json
+import queue
 import subprocess
 import sys
 import threading
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 TRACES_PATH = "/v1/traces"
 
@@ -27,9 +33,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != TRACES_PATH:
             self._reply(404)
             return
-        with self.server.lock:
-            self.server.requests += 1
-            self.server.received_bytes += len(body)
+        self.server.received.put(body)
         # An empty body is an empty ExportTraceServiceResponse: everything accepted
         self._reply(200, content_type="application/x-protobuf")
 
@@ -37,8 +41,8 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/stats":
             self._reply(404)
             return
-        with self.server.lock:
-            stats = {"requests": self.server.requests, "bytes": self.server.received_bytes}
+        self.server.received.join()
+        stats = {"requests": self.server.requests, "bytes": self.server.received_bytes, "spans": self.server.spans}
         self._reply(200, json.dumps(stats).encode(), content_type="application/json")
 
     def _reply(self, status: int, body: bytes = b"", content_type: str = "text/plain") -> None:
@@ -57,9 +61,21 @@ class _Sink(ThreadingHTTPServer):
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
-        self.lock = threading.Lock()
+        self.received: queue.Queue[bytes] = queue.Queue()
         self.requests = 0
         self.received_bytes = 0
+        self.spans = 0
+        # Decoding off the request thread: the exporter gets its answer as soon as the body is read
+        threading.Thread(target=self._count, daemon=True).start()
+
+    def _count(self) -> None:
+        while True:
+            body = self.received.get()
+            request = ExportTraceServiceRequest.FromString(body)
+            self.requests += 1
+            self.received_bytes += len(body)
+            self.spans += sum(len(scope.spans) for resource in request.resource_spans for scope in resource.scope_spans)
+            self.received.task_done()
 
 
 @contextmanager
@@ -75,6 +91,15 @@ def running_sink() -> Iterator[str]:
     finally:
         process.terminate()
         process.wait()
+
+
+def stats(sink: str) -> dict[str, int]:
+    """
+    What the sink at `sink` has received, once it has counted every request it answered.
+    """
+    with urllib.request.urlopen(sink + "/stats") as response:  # noqa: S310 - the local sink
+        received: dict[str, int] = json.load(response)
+        return received
 
 
 def main() -> None:

@@ -33,7 +33,7 @@ class _DiscardingExporter(SpanExporter):
 
 
 def _api(sink: str) -> Setup:
-    # What `trace.get_tracer()` gives an application that has instrumentation but no SDK
+    # The tracer that the API's proxy hands every call to in an application without the SDK
     return Setup(NoOpTracerProvider(), lambda: None)
 
 

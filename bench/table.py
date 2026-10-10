@@ -13,7 +13,7 @@ from typing import NamedTuple
 
 import pyperf
 
-from bench.run import cpu_log_of
+from bench.run import cpu_log_of, lost_of
 from bench.scenarios import BASELINE, SCENARIOS
 
 # fastotel pays off when the SDK with the OTLP exporter costs the workload at least this share of its throughput
@@ -35,8 +35,10 @@ class Row(NamedTuple):
     hot_path_ns: Measure
     # Units of work per second, by span rate
     throughput: dict[int, Measure]
-    # CPU time of the threads other than the workload's, per span; None when no span was created
+    # CPU time of the threads other than the workload's, per span, at DECISION_RATE; None without spans
     exporter_us_per_span: float | None
+    # Share of the spans that never reach the sink, by span rate; None when the scenario sends it nothing
+    lost: dict[int, float | None]
 
 
 class Verdict(NamedTuple):
@@ -70,17 +72,25 @@ def load(path: Path) -> list[Row]:
         elif match := re.fullmatch(r"workload@(\d+)", kind):
             throughput[scenario][int(match.group(1))] = _measure(bench, invert=True)
 
+    # At one rate: at 10k spans/s the SDK drops spans it then never encodes, which would understate the cost
     background: dict[str, float] = defaultdict(float)
     spans: dict[str, int] = defaultdict(int)
+    gil = metadata.get("fastotel_gil", "on") == "on"
     log = cpu_log_of(str(path))
     if log.exists():
         for line in log.read_text().splitlines():
             record = json.loads(line)
-            background[record["scenario"]] += record["process_cpu"] - record["workload_cpu"]
-            spans[record["scenario"]] += record["spans"]
+            gil = gil or record.get("gil", False)
+            if record["rate"] == DECISION_RATE:
+                background[record["scenario"]] += record["process_cpu"] - record["workload_cpu"]
+                spans[record["scenario"]] += record["spans"]
+
+    lost: dict[str, dict[int, float | None]] = defaultdict(dict)
+    if lost_of(str(path)).exists():
+        for scenario, by_rate in json.loads(lost_of(str(path)).read_text()).items():
+            lost[scenario] = {int(rate): share for rate, share in by_rate.items()}
 
     python = str(metadata.get("fastotel_python", metadata.get("python_version", "?")))
-    gil = metadata.get("fastotel_gil", "on") == "on"
     return [
         Row(
             python,
@@ -89,6 +99,7 @@ def load(path: Path) -> list[Row]:
             hot_path[scenario],
             throughput[scenario],
             background[scenario] / spans[scenario] * 1e6 if spans[scenario] else None,
+            lost[scenario],
         )
         for scenario in SCENARIOS
         if scenario in hot_path
@@ -99,6 +110,10 @@ def _rate(rate: int) -> str:
     return f"{rate // 1000}k" if rate % 1000 == 0 else str(rate)
 
 
+def _share(share: float | None) -> str:
+    return "" if share is None else f"{max(share, 0.0):.1%}"
+
+
 def _python(row: Row) -> str:
     return f"{row.python} (GIL {'on' if row.gil else 'off'})"
 
@@ -107,7 +122,10 @@ def render(rows: list[Row]) -> str:
     rates = sorted({rate for row in rows for rate in row.throughput})
     header = ["Python", "Scenario", "Hot path, ns/span"]
     header += [f"Workload, ops/s at {_rate(rate)} spans/s" for rate in rates]
-    header += ["Exporter threads, CPU µs/span"]
+    header += [f"Exporter threads, CPU µs/span at {_rate(DECISION_RATE)} spans/s"]
+    lost_rates = sorted({rate for row in rows for rate in row.lost})
+    if lost_rates:
+        header += ["Spans lost at " + " / ".join(_rate(rate) for rate in lost_rates) + " spans/s"]
     baselines = {row.python: row for row in rows if row.scenario == BASELINE}
 
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
@@ -126,6 +144,9 @@ def render(rows: list[Row]) -> str:
                 cell += f" ({measure.mean / reference.mean - 1:+.1%})"
             cells.append(cell)
         cells.append("" if row.exporter_us_per_span is None else f"{max(row.exporter_us_per_span, 0.0):.1f}")
+        if lost_rates:
+            shares = [row.lost.get(rate) for rate in lost_rates]
+            cells.append("" if all(share is None for share in shares) else " / ".join(_share(s) for s in shares))
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
