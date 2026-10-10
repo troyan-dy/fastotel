@@ -45,6 +45,7 @@ Needs [uv](https://docs.astral.sh/uv/) and a Rust toolchain ([rustup](https://ru
 make install   # build the extension, install the dev dependencies
 make test      # run the tests
 make lint      # ruff, mypy, cargo fmt, clippy
+make bench     # what the stock SDK costs an application, on a GIL and a free-threaded build (~30 min)
 ```
 
 Every change that reaches `master` is a release: a pull request bumps the version in `pyproject.toml`
