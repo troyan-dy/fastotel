@@ -4,6 +4,9 @@ A fake OTLP/HTTP receiver for the tests: an HTTP server in the test process that
 """
 
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
@@ -38,6 +41,7 @@ class _Handler(BaseHTTPRequestHandler):
         received = Received(self.path, headers, ExportTraceServiceRequest.FromString(body))
         with self.server.lock:
             self.server.received.append(received)
+        self.server.answering.wait()
         # An empty body is an empty ExportTraceServiceResponse: everything accepted
         self._reply(200, content_type="application/x-protobuf")
 
@@ -58,6 +62,9 @@ class _Server(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _Handler)
         self.lock = threading.Lock()
         self.received: list[Received] = []
+        # Cleared while the receiver is stalled
+        self.answering = threading.Event()
+        self.answering.set()
 
 
 class FakeReceiver:
@@ -100,6 +107,27 @@ class FakeReceiver:
             for span in scope_spans.spans
         ]
 
+    def wait_for_requests(self, count: int, timeout: float = 10) -> list[ExportTraceServiceRequest]:
+        """
+        The requests received once there are at least `count`, or all of them after `timeout` seconds.
+        """
+        deadline = time.monotonic() + timeout
+        while len(requests := self.requests) < count and time.monotonic() < deadline:
+            time.sleep(0.005)
+        return requests
+
+    @contextmanager
+    def stalled(self) -> Iterator[None]:
+        """
+        Records requests as they arrive but holds every answer back until the end of the block, as a collector
+        that has stopped answering.
+        """
+        self._server.answering.clear()
+        try:
+            yield
+        finally:
+            self._server.answering.set()
+
     def __enter__(self) -> Self:
         self._thread.start()
         return self
@@ -107,5 +135,6 @@ class FakeReceiver:
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
     ) -> None:
+        self._server.answering.set()
         self._server.shutdown()
         self._server.server_close()

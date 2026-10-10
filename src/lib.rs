@@ -10,8 +10,6 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyMapping, PySequence, PyString};
 
-// The limit shutdown() waits for the last export, the default of OTEL_BSP_EXPORT_TIMEOUT
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 // Resources and scopes copied at most once each; more distinct ones than this are copied with every span
 const MAX_CACHED: usize = 64;
 
@@ -28,10 +26,24 @@ struct Processor {
 
 #[pymethods]
 impl Processor {
+    /// The arguments are checked and defaulted by `OTLPSpanProcessor`, as `BatchSpanProcessor` checks them.
     #[new]
-    fn new(endpoint: String) -> Self {
+    fn new(
+        endpoint: String,
+        max_queue_size: usize,
+        schedule_delay_millis: f64,
+        max_export_batch_size: usize,
+        export_timeout_millis: f64,
+    ) -> Self {
+        let config = Config {
+            max_queue_size,
+            max_export_batch_size,
+            schedule_delay: millis(schedule_delay_millis),
+            export_timeout: millis(export_timeout_millis),
+            ..Config::new(endpoint)
+        };
         Self {
-            pipeline: Pipeline::new(Config::new(endpoint)),
+            pipeline: Pipeline::new(config),
             resources: Copies::new(),
             scopes: Copies::new(),
         }
@@ -57,8 +69,25 @@ impl Processor {
     }
 
     fn shutdown(&self, py: Python<'_>) -> bool {
-        py.detach(|| self.pipeline.shutdown(SHUTDOWN_TIMEOUT))
+        py.detach(|| {
+            self.pipeline
+                .shutdown(self.pipeline.config().export_timeout)
+        })
     }
+
+    /// The spans dropped so far because the queue was full; `stats()` exposes it with #14.
+    fn dropped_spans(&self) -> u64 {
+        self.pipeline.dropped_spans()
+    }
+}
+
+/// Milliseconds as the SDK takes them, a float: negative or NaN is no time, too many to hold is forever.
+fn millis(millis: f64) -> Duration {
+    Duration::try_from_secs_f64(millis / 1000.0).unwrap_or(if millis > 0.0 {
+        Duration::MAX
+    } else {
+        Duration::ZERO
+    })
 }
 
 impl Processor {
