@@ -26,27 +26,38 @@ struct Processor {
 
 #[pymethods]
 impl Processor {
-    /// The arguments are checked and defaulted by `OTLPSpanProcessor`, as `BatchSpanProcessor` checks them.
+    /// The arguments are checked and defaulted by `OTLPSpanProcessor`, as `BatchSpanProcessor` and
+    /// `OTLPSpanExporter` check them; a header HTTP cannot carry raises `ValueError` here, not at every export.
     #[new]
     fn new(
         endpoint: String,
+        headers: Vec<(String, String)>,
+        timeout: f64,
         max_queue_size: usize,
         schedule_delay_millis: f64,
         max_export_batch_size: usize,
         export_timeout_millis: f64,
-    ) -> Self {
+    ) -> PyResult<Self> {
+        let headers = fastotel_export::headers(
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )
+        .map_err(PyValueError::new_err)?;
         let config = Config {
+            headers,
+            timeout: seconds(timeout),
             max_queue_size,
             max_export_batch_size,
             schedule_delay: millis(schedule_delay_millis),
             export_timeout: millis(export_timeout_millis),
             ..Config::new(endpoint)
         };
-        Self {
+        Ok(Self {
             pipeline: Pipeline::new(config),
             resources: Copies::new(),
             scopes: Copies::new(),
-        }
+        })
     }
 
     fn on_end(&self, span: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -78,6 +89,19 @@ impl Processor {
     /// The spans dropped so far because the queue was full; `stats()` exposes it with #14.
     fn dropped_spans(&self) -> u64 {
         self.pipeline.dropped_spans()
+    }
+}
+
+/// Seconds as the reference exporter takes them, a float. What its requests cannot wait for fails every request
+/// at once, as there: NaN, not positive, or more than a socket timeout holds (2^63 ns, about 292 years), infinity
+/// included.
+fn seconds(seconds: f64) -> Duration {
+    // Below the limit, so that adding the timeout to the clock cannot overflow
+    const MAX_SECONDS: f64 = 9_223_372_036.0;
+    if seconds > 0.0 && seconds < MAX_SECONDS {
+        Duration::from_secs_f64(seconds)
+    } else {
+        Duration::ZERO
     }
 }
 

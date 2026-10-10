@@ -6,6 +6,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-10
+
+### Added
+
+- `OTLPSpanProcessor` reads the exporter configuration of the reference `OTLPSpanExporter` (#10): the arguments
+  `endpoint`, `headers`, `timeout`, `compression`, `certificate_file`, `client_key_file` and
+  `client_certificate_file`, or the `OTEL_EXPORTER_OTLP_TRACES_*` and `OTEL_EXPORTER_OTLP_*` variables, with the
+  reference's precedence, header parsing and percent-decoding, defaults and warnings, compared with the reference
+  in the tests. Headers and the timeout apply to every request; compression and the TLS files are read and applied
+  with #11.
+- `docs/adr/0005-exporter-configuration.md`: how the configuration is read and where fastotel differs from the
+  reference: a header HTTP cannot carry raises `ValueError` at construction, and `compression` also takes a string.
+
+### Changed
+
+- Requests carry `User-Agent: fastotel/<version>` instead of ureq's.
+- The request timeout, fixed at 10 s, is now `timeout` or `OTEL_EXPORTER_OTLP_TIMEOUT`.
+
 ## [0.6.0] - 2026-10-10
 
 ### Added
@@ -83,7 +101,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/troyan-dy/fastotel/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/troyan-dy/fastotel/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/troyan-dy/fastotel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/troyan-dy/fastotel/compare/v0.3.0...v0.4.0

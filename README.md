@@ -8,8 +8,8 @@
 A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path.
 
 > **Status: pre-alpha.** `OTLPSpanProcessor` sends every field of a span over OTLP/HTTP, encoded as
-> `OTLPSpanExporter` encodes it, and batches as `BatchSpanProcessor` does, but with no retries, gzip or
-> `OTEL_EXPORTER_OTLP_*` configuration yet, and a process forked after the first span exports nothing from the
+> `OTLPSpanExporter` encodes it, configured as it is configured, and batches as `BatchSpanProcessor` does, but
+> with no retries, gzip or custom TLS yet, and a process forked after the first span exports nothing from the
 > child. The road to 1.0 is in
 > [#5](https://github.com/troyan-dy/fastotel/issues/5).
 
@@ -50,15 +50,37 @@ from opentelemetry.sdk.trace import TracerProvider
 from fastotel import OTLPSpanProcessor
 
 provider = TracerProvider()
-provider.add_span_processor(OTLPSpanProcessor(endpoint="http://localhost:4318/v1/traces"))
+provider.add_span_processor(OTLPSpanProcessor())  # reads OTEL_EXPORTER_OTLP_* and OTEL_BSP_*
 trace.set_tracer_provider(provider)
 ```
 
-`endpoint` is the URL spans are posted to, `/v1/traces` included, as for `OTLPSpanExporter`; the one above is the
-default. `on_end` copies the span into Rust and returns; a native thread, started by the first span, batches,
+`on_end` copies the span into Rust and returns; a native thread, started by the first span, batches,
 encodes and sends spans without taking the GIL. As with `BatchSpanProcessor`, only sampled spans are exported. The
 requests decode to what `OTLPSpanExporter` sends for the same spans; where they differ is in
 [ADR 0003](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0003-span-encoding.md).
+
+### Exporter
+
+The arguments and variables of `OTLPSpanExporter` (`opentelemetry-exporter-otlp-proto-http`), with its defaults,
+precedence and parsing: an argument overrides the `OTEL_EXPORTER_OTLP_TRACES_*` variable, which overrides the
+`OTEL_EXPORTER_OTLP_*` one; an empty variable counts as unset. A timeout or a compression that does not parse gives
+the default, and a header entry that does not parse is skipped, each with the reference's warning on the
+`fastotel` logger.
+
+| Argument | Variables | Default | What it does |
+| --- | --- | --- | --- |
+| `endpoint` | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, as it is; `OTEL_EXPORTER_OTLP_ENDPOINT`, with `/v1/traces` appended | `http://localhost:4318/v1/traces` | the URL spans are posted to; the argument, like the traces variable, includes the path |
+| `headers` | `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `OTEL_EXPORTER_OTLP_HEADERS` | `Content-Type: application/x-protobuf`, `User-Agent: fastotel/<version>` | sent with every request; a variable holds `name=value` pairs separated by commas, URL-encoded (`Authorization=Basic%20dXNlcg%3D%3D`); names are lower-cased, and the argument's headers are merged over the variable's |
+| `timeout` | `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`, `OTEL_EXPORTER_OTLP_TIMEOUT` | 10 | seconds a request may take |
+| `compression` | `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION`, `OTEL_EXPORTER_OTLP_COMPRESSION` | `none` | `gzip`, `deflate` or `none`; the argument is the reference's `Compression` or a string. Read, but requests are not compressed before #11 |
+| `certificate_file` | `OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CERTIFICATE` | the OS trust store | the CA to verify the collector with. Read, but applied from #11 |
+| `client_certificate_file` | `OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` | none | the client certificate for mTLS. Read, but applied from #11 |
+| `client_key_file` | `OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_CLIENT_KEY` | none | its key, used only with a client certificate. Read, but applied from #11 |
+
+`OTLPSpanExporter`'s `session`, `max_request_size` and `meter_provider`, and its credential provider variables,
+have no counterpart. Where fastotel differs from the reference (its own user agent, a header that HTTP cannot
+carry raises `ValueError`, `compression` also takes a string) is in
+[ADR 0005](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0005-exporter-configuration.md).
 
 ### Batching
 
