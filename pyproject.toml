@@ -1,6 +1,6 @@
 [project]
 name = "fastotel"
-version = "0.2.0"
+version = "0.3.0"
 description = "A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path"
 readme = "README.md"
 license = "MIT"

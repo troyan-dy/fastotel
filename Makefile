@@ -41,7 +41,7 @@ test-all: ## Run tests on every supported Python version, free-threaded and pre-
 	done
 
 .PHONY: bench
-bench: ## Measure what the SDK's span export costs (bench/), about 25 minutes; pyperf options go in BENCH_ARGS
+bench: ## Measure what the SDK's span export costs (bench/), about 30 minutes; pyperf options go in BENCH_ARGS
 	@rm -rf .bench && mkdir .bench
 	@for v in $(BENCH_PYTHONS); do \
 		echo "==> Python $$v"; \
