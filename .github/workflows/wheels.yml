@@ -54,10 +54,12 @@ jobs:
         if: matrix.platform.python
         shell: bash
         run: |
-          # The reference exporter and hypothesis for the compatibility test, which compares the two on every platform
+          # The reference exporter and hypothesis for the compatibility test, which compares the two on every platform;
+          # trustme for the TLS tests, from a cryptography release with a wheel for the platform rather than a build
           check() {
             uv run --isolated --no-project --python "cpython-$1-$PLATFORM" --with pytest --with "opentelemetry-proto>=1.45" \
-              --with "opentelemetry-exporter-otlp-proto-http>=1.45" --with "hypothesis>=6" --with "$(ls dist/*-"$2"-*.whl)" \
+              --with "opentelemetry-exporter-otlp-proto-http>=1.45" --with "hypothesis>=6" --with "trustme>=1.2" \
+              --no-build-package cryptography --no-build-package cffi --with "$(ls dist/*-"$2"-*.whl)" \
               pytest -p no:cacheprovider tests
           }
           check 3.11 abi3

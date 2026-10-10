@@ -8,9 +8,9 @@
 A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path.
 
 > **Status: pre-alpha.** `OTLPSpanProcessor` sends every field of a span over OTLP/HTTP, encoded as
-> `OTLPSpanExporter` encodes it, configured as it is configured, and batches as `BatchSpanProcessor` does, but
-> with no retries, gzip or custom TLS yet, and a process forked after the first span exports nothing from the
-> child. The road to 1.0 is in
+> `OTLPSpanExporter` encodes it, configured as it is configured, compressed, through TLS and with its retries, and
+> batches as `BatchSpanProcessor` does, but a process forked after the first span exports nothing from the child
+> yet. The road to 1.0 is in
 > [#5](https://github.com/troyan-dy/fastotel/issues/5).
 
 ## Why
@@ -71,16 +71,32 @@ the default, and a header entry that does not parse is skipped, each with the re
 | --- | --- | --- | --- |
 | `endpoint` | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, as it is; `OTEL_EXPORTER_OTLP_ENDPOINT`, with `/v1/traces` appended | `http://localhost:4318/v1/traces` | the URL spans are posted to; the argument, like the traces variable, includes the path |
 | `headers` | `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `OTEL_EXPORTER_OTLP_HEADERS` | `Content-Type: application/x-protobuf`, `User-Agent: fastotel/<version>` | sent with every request; a variable holds `name=value` pairs separated by commas, URL-encoded (`Authorization=Basic%20dXNlcg%3D%3D`); names are lower-cased, and the argument's headers are merged over the variable's |
-| `timeout` | `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`, `OTEL_EXPORTER_OTLP_TIMEOUT` | 10 | seconds a request may take |
-| `compression` | `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION`, `OTEL_EXPORTER_OTLP_COMPRESSION` | `none` | `gzip`, `deflate` or `none`; the argument is the reference's `Compression` or a string. Read, but requests are not compressed before #11 |
-| `certificate_file` | `OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CERTIFICATE` | the OS trust store | the CA to verify the collector with. Read, but applied from #11 |
-| `client_certificate_file` | `OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` | none | the client certificate for mTLS. Read, but applied from #11 |
-| `client_key_file` | `OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_CLIENT_KEY` | none | its key, used only with a client certificate. Read, but applied from #11 |
+| `timeout` | `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`, `OTEL_EXPORTER_OTLP_TIMEOUT` | 10 | seconds the export of a batch may take, retries included |
+| `compression` | `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION`, `OTEL_EXPORTER_OTLP_COMPRESSION` | `none` | `gzip`, `deflate` or `none`; the argument is the reference's `Compression` or a string. Adds `Content-Encoding` unless the headers carry one |
+| `certificate_file` | `OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CERTIFICATE` | the OS trust store | a PEM file of the CAs to verify an `https://` collector with, in place of the OS trust store |
+| `client_certificate_file` | `OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` | none | the client certificate chain for mTLS, PEM; without `client_key_file` the file holds the key too |
+| `client_key_file` | `OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_CLIENT_KEY` | none | its key, used only with a client certificate |
 
 `OTLPSpanExporter`'s `session`, `max_request_size` and `meter_provider`, and its credential provider variables,
 have no counterpart. Where fastotel differs from the reference (its own user agent, a header that HTTP cannot
 carry raises `ValueError`, `compression` also takes a string) is in
 [ADR 0005](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0005-exporter-configuration.md).
+
+### Delivery
+
+As the OTLP/HTTP specification asks and `OTLPSpanExporter` does: a batch answered with 429, 502, 503 or 504, or
+that meets a connection error (refused, dropped, DNS, TLS), is sent again after 1, 2, 4, 8, 16 s, give or take 20%,
+or after the answer's `Retry-After`, in at most 6 attempts and only while `timeout` lasts; any other error drops
+the batch, and a redirect is not followed and counts as sent.
+The spans of a dropped batch and those a collector rejects in a partial success are counted (the counts are public
+with #14). Connections are reused across exports. While the collector is down, a batch costs at most `timeout`,
+mostly asleep, and the queue keeps memory bounded; exports resume with the next batch once it is back.
+
+An `https://` endpoint is verified through rustls against the OS trust store, so corporate CAs work, or against
+`certificate_file`; a TLS file that cannot be read or holds no usable certificate or key raises from the
+constructor. Where this differs from the reference (gzip at level 6, TLS files checked at construction, among
+others) is in
+[ADR 0006](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0006-production-transport.md).
 
 ### Batching
 

@@ -185,7 +185,14 @@ def test_shutdown_exports_what_is_queued_then_ignores_spans(receiver: FakeReceiv
 
 def _export_threads() -> int:
     # Counted rather than looked for: a processor another test left running has a thread of the same name
-    return [comm.read_text().strip() for comm in Path("/proc/self/task").glob("*/comm")].count("fastotel-export")
+    names = []
+    for comm in Path("/proc/self/task").glob("*/comm"):
+        try:
+            names.append(comm.read_text().strip())
+        except FileNotFoundError:
+            # A thread that ended since the listing, a receiver's among others
+            pass
+    return names.count("fastotel-export")
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the threads of the process from /proc")

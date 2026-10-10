@@ -193,10 +193,10 @@ def _no_compression() -> Any:
             {"client_certificate_file": "/arg-c.pem", "client_key_file": "/arg-k.pem"},
         ),
         ({"OTEL_EXPORTER_OTLP_CLIENT_KEY": "/k.pem"}, {"client_certificate_file": "/arg-c.pem"}),
-        # Everything at once
+        # Everything at once; over http://, since an https:// endpoint reads the TLS files, which are not there
         (
             {
-                "OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector:4318",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
                 "OTEL_EXPORTER_OTLP_HEADERS": "api-key=1",
                 "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT": "4",
                 "OTEL_EXPORTER_OTLP_COMPRESSION": "gzip",

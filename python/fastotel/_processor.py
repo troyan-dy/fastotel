@@ -2,6 +2,8 @@ import logging
 import os
 from collections.abc import Mapping
 from enum import Enum
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
@@ -27,9 +29,12 @@ class OTLPSpanProcessor(SpanProcessor):
     `on_end` copies the span into Rust and returns; a native thread, started with the first span, batches,
     encodes and sends them without taking the GIL. Only sampled spans are exported, as with `BatchSpanProcessor`.
 
-    `endpoint`, `headers`, `timeout` (seconds, for each request), `compression` and the TLS files are the arguments
-    of `OTLPSpanExporter`, read with its `OTEL_EXPORTER_OTLP_*` variables, precedence and defaults; `endpoint` is
-    the URL spans are posted to, `/v1/traces` included. Compression and the TLS files are read but not applied yet.
+    `endpoint`, `headers`, `timeout` (seconds, for the export of a batch, retries included), `compression` and the
+    TLS files are the arguments of `OTLPSpanExporter`, read with its `OTEL_EXPORTER_OTLP_*` variables, precedence
+    and defaults; `endpoint` is the URL spans are posted to, `/v1/traces` included. A batch that fails with a
+    retryable status or a connection error is sent again with exponential backoff, honouring `Retry-After`, until
+    `timeout` has passed. An `https://` endpoint is verified against the OS trust store, or against
+    `certificate_file` when it is given.
     The other arguments are those of `BatchSpanProcessor`, with its `OTEL_BSP_*` variables, defaults and checks: a
     batch leaves at `max_export_batch_size` spans or `schedule_delay_millis` after the previous export, a span ended
     while `max_queue_size` spans wait is dropped, and `shutdown` waits `export_timeout_millis` for the last export.
@@ -90,10 +95,19 @@ class OTLPSpanProcessor(SpanProcessor):
         self._schedule_delay_millis = schedule_delay_millis
         self._max_export_batch_size = max_export_batch_size
         self._export_timeout_millis = export_timeout_millis
+        # As by requests, the TLS files matter only to an https:// endpoint; a file that cannot be read or holds no
+        # certificate or key raises here, where the reference fails every export
+        https = urlsplit(self._endpoint).scheme == "https"
+        client_certificate = _read(self._client_certificate_file) if https else None
         self._native = _fastotel.Processor(
             self._endpoint,
             list(self._headers.items()),
             self._timeout,
+            self._compression,
+            _read(self._certificate_file) if https else None,
+            client_certificate,
+            # A key without a certificate is not used, and a certificate without a key file holds the key
+            _read(self._client_key_file) if client_certificate is not None else None,
             max_queue_size,
             schedule_delay_millis,
             max_export_batch_size,
@@ -109,6 +123,10 @@ class OTLPSpanProcessor(SpanProcessor):
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         # A negative timeout is an expired one, not an OverflowError from the native side
         return self._native.force_flush(max(timeout_millis, 0))
+
+
+def _read(path: str | None) -> bytes | None:
+    return Path(path).read_bytes() if path else None
 
 
 def _int_from_environ(name: str, default: int) -> int:
