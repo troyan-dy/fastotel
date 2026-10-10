@@ -13,7 +13,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - `make bench`: `pyperf` scenarios in `bench/` that measure what the stock SDK costs an application, the API
   with no SDK against `BatchSpanProcessor` with a no-op exporter and with the OTLP/HTTP exporter sending to a
   local sink (#6). They report ns per span on the hot path, the throughput of a CPU-bound workload at 1k, 5k
-  and 10k spans/s, and the CPU time of the exporter thread, on a GIL and a free-threaded build. The package
+  and 10k spans/s, the CPU time of the exporter thread and the share of spans lost, on a GIL and a free-threaded
+  build. The package
   itself is unchanged; the benchmark dependencies live in the `bench` dependency group.
 - `docs/adr/0001-why-fastotel.md`: the numbers and the go/no-go decision for building fastotel.
 
