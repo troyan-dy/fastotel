@@ -8,8 +8,9 @@
 A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path.
 
 > **Status: pre-alpha.** `OTLPSpanProcessor` sends every field of a span over OTLP/HTTP, encoded as
-> `OTLPSpanExporter` encodes it, but with no retries, gzip or `OTEL_*` configuration yet, and a process forked
-> after the first span exports nothing from the child. The road to 1.0 is in
+> `OTLPSpanExporter` encodes it, and batches as `BatchSpanProcessor` does, but with no retries, gzip or
+> `OTEL_EXPORTER_OTLP_*` configuration yet, and a process forked after the first span exports nothing from the
+> child. The road to 1.0 is in
 > [#5](https://github.com/troyan-dy/fastotel/issues/5).
 
 ## Why
@@ -55,10 +56,25 @@ trace.set_tracer_provider(provider)
 
 `endpoint` is the URL spans are posted to, `/v1/traces` included, as for `OTLPSpanExporter`; the one above is the
 default. `on_end` copies the span into Rust and returns; a native thread, started by the first span, batches,
-encodes and sends spans without taking the GIL. As with `BatchSpanProcessor`, only sampled spans are exported, a
-batch leaves at 512 spans or every 5 seconds, and spans beyond a queue of 2048 are dropped. The requests decode to
-what `OTLPSpanExporter` sends for the same spans; where they differ is in
+encodes and sends spans without taking the GIL. As with `BatchSpanProcessor`, only sampled spans are exported. The
+requests decode to what `OTLPSpanExporter` sends for the same spans; where they differ is in
 [ADR 0003](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0003-span-encoding.md).
+
+### Batching
+
+The arguments and variables of `BatchSpanProcessor`, with its defaults, parsing and checks: an argument overrides
+its variable, a variable that is not an integer gives the default and an error log on the `fastotel` logger, and a
+value out of range raises `ValueError` from the constructor.
+
+| Argument | Variable | Default | What it does |
+| --- | --- | --- | --- |
+| `max_queue_size` | `OTEL_BSP_MAX_QUEUE_SIZE` | 2048 | spans waiting for export; a span ended while the queue is full is dropped and counted (the count is public with #14), and `on_end` never blocks |
+| `max_export_batch_size` | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | 512 | a batch leaves as soon as it is full; at most `max_queue_size` |
+| `schedule_delay_millis` | `OTEL_BSP_SCHEDULE_DELAY` | 5000 | otherwise, what is queued leaves this long after the previous export |
+| `export_timeout_millis` | `OTEL_BSP_EXPORT_TIMEOUT` | 30000 | how long `shutdown()` waits for the last export |
+
+Where this differs from `BatchSpanProcessor` (a full queue drops the newest span rather than the oldest, among
+others) is in [ADR 0004](https://github.com/troyan-dy/fastotel/blob/master/docs/adr/0004-batching-and-the-queue.md).
 
 ## Development
 

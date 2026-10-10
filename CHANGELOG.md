@@ -6,6 +6,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-10
+
+### Added
+
+- `OTLPSpanProcessor` takes the batching settings of `BatchSpanProcessor` (#9): `max_queue_size`,
+  `schedule_delay_millis`, `max_export_batch_size` and `export_timeout_millis`, or the `OTEL_BSP_*` variables, with
+  the SDK's defaults, parsing, error log and checks, compared with `BatchSpanProcessor` in the tests. A batch leaves
+  when it is full or when the delay expires; `shutdown()` waits up to the export timeout.
+- A full queue drops the span and counts it, without blocking `on_end`; while the collector hangs, fastotel holds
+  at most the queue and the batch being sent.
+- `docs/adr/0004-batching-and-the-queue.md`: the settings, the queue and where fastotel differs from
+  `BatchSpanProcessor`.
+
+### Changed
+
+- The worker is woken by a full batch or its timer instead of by every span, so `on_end` no longer pays for waking
+  a thread: about 0.6 µs less per span. The queue allocates as it fills, so a large `max_queue_size` costs no
+  memory up front.
+
 ## [0.5.0] - 2026-10-10
 
 ### Added
@@ -64,7 +83,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/troyan-dy/fastotel/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/troyan-dy/fastotel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/troyan-dy/fastotel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/troyan-dy/fastotel/compare/v0.2.0...v0.3.0
