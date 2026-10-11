@@ -210,6 +210,10 @@ def test_starts_no_thread_before_the_first_span(receiver: FakeReceiver) -> None:
     assert _export_threads() == before + 1
 
     provider.shutdown()
+    # Joined, but the kernel lists a thread a little after it has let its joiner go
+    deadline = time.monotonic() + 5
+    while _export_threads() != before and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert _export_threads() == before
 
 
