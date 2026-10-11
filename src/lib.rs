@@ -1,4 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::any::Any;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use fastotel_export::{
@@ -7,6 +11,7 @@ use fastotel_export::{
 };
 use pyo3::exceptions::{PyAttributeError, PyException, PyTypeError, PyValueError};
 use pyo3::intern;
+use pyo3::panic::PanicException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyMapping, PySequence, PyString};
 
@@ -22,6 +27,8 @@ struct Processor {
     pipeline: Pipeline,
     resources: Copies<Resource>,
     scopes: Copies<Option<Scope>>,
+    // Set at exit before 3.14: a thread back from a wait without the GIL hangs rather than take it back
+    hang_at_exit: AtomicBool,
 }
 
 #[pymethods]
@@ -73,41 +80,84 @@ impl Processor {
             pipeline: Pipeline::new(config),
             resources: Copies::new(),
             scopes: Copies::new(),
+            hang_at_exit: AtomicBool::new(false),
         })
     }
 
     fn on_end(&self, span: &Bound<'_, PyAny>) -> PyResult<()> {
-        match self.copy(span) {
-            Ok(Some(span)) => self.pipeline.push(span),
-            Ok(None) => {}
+        let py = span.py();
+        // A panic must not unwind into the application's span.end(), nor abort the interpreter: it loses the span
+        match panic::catch_unwind(AssertUnwindSafe(|| self.end(span))) {
+            Ok(Ok(())) => {}
             // on_end runs inside the application's span.end(): a span that cannot be copied is dropped rather
             // than raising there, and reporting it comes with #14. KeyboardInterrupt and SystemExit go through
-            Err(error) if error.is_instance_of::<PyException>(span.py()) => {}
-            Err(error) => return Err(error),
+            Ok(Err(error)) if error.is_instance_of::<PyException>(py) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(payload) => self.panicked(py, "on_end", &*payload),
         }
         Ok(())
     }
 
-    fn force_flush(&self, py: Python<'_>, timeout_millis: u64) -> bool {
-        py.detach(|| {
-            self.pipeline
-                .force_flush(Duration::from_millis(timeout_millis))
-        })
+    /// Milliseconds as a float, as `force_flush(timeout_millis)` may get them: negative or NaN is no time.
+    fn force_flush(&self, py: Python<'_>, timeout_millis: f64) -> bool {
+        // Returns false then, without letting go of the GIL, which a daemon thread must not take back while the
+        // interpreter finalizes (`Pipeline::exit`)
+        if self.pipeline.is_closed() && !self.pipeline.open_on_this_thread() {
+            return false;
+        }
+        let flushed = self.detach_counted(py, || {
+            panic::catch_unwind(AssertUnwindSafe(|| {
+                self.pipeline.force_flush(millis(timeout_millis))
+            }))
+        });
+        let flushed = flushed.unwrap_or_else(|payload| {
+            self.panicked(py, "force_flush", &*payload);
+            false
+        });
+        self.log_worker_panics(py);
+        flushed
     }
 
     fn shutdown(&self, py: Python<'_>) -> bool {
-        py.detach(|| {
-            self.pipeline
-                .shutdown(self.pipeline.config().export_timeout)
-        })
+        // As force_flush: no letting go of the GIL on a daemon thread at exit; the shutdown is left to the thread
+        // that exits, which a provider older than the import of fastotel shuts down after fastotel's exit handler
+        if self.pipeline.exited_elsewhere() {
+            return false;
+        }
+        let done = self.detach_counted(py, || {
+            panic::catch_unwind(AssertUnwindSafe(|| {
+                self.pipeline
+                    .shutdown(self.pipeline.config().export_timeout)
+            }))
+        });
+        let done = done.unwrap_or_else(|payload| {
+            self.panicked(py, "shutdown", &*payload);
+            false
+        });
+        self.log_worker_panics(py);
+        done
     }
 
-    /// The spans dropped so far because the queue was full; `stats()` exposes the counters with #14.
+    /// Called at exit, before the interpreter finalizes: see `Pipeline::exit`. With `hang`, a thread that comes
+    /// back from a wait without the GIL afterwards hangs there, as CPython 3.14 hangs a daemon thread that takes
+    /// the GIL during finalization, rather than take the GIL back inside Rust code.
+    fn exiting(&self, hang: bool) {
+        self.hang_at_exit.store(hang, Ordering::SeqCst);
+        self.pipeline.exit();
+    }
+
+    /// The spans dropped so far because the queue was full or the processor shut down; `stats()` exposes the
+    /// counters with #14.
     fn dropped_spans(&self) -> u64 {
         self.pipeline.dropped_spans()
     }
 
-    /// The spans of batches dropped so far because their export failed.
+    /// The panics caught so far, in the worker or in a call from Python.
+    fn panics(&self) -> u64 {
+        self.pipeline.panics()
+    }
+
+    /// The spans of batches dropped so far because their export failed or the worker panicked.
     fn failed_spans(&self) -> u64 {
         self.pipeline.failed_spans()
     }
@@ -120,6 +170,84 @@ impl Processor {
     /// The requests sent again so far.
     fn retries(&self) -> u64 {
         self.pipeline.retries()
+    }
+}
+
+impl Processor {
+    fn end(&self, span: &Bound<'_, PyAny>) -> PyResult<()> {
+        // One atomic load before the copy, so that a span ended after shutdown costs nothing more. Nothing in
+        // Python is called then, not even to tell whether the span is sampled: at exit, a daemon thread must not
+        // be stopped inside Rust code (`Pipeline::exit`)
+        if self.pipeline.is_closed() && !self.pipeline.open_on_this_thread() {
+            self.pipeline.drop_span();
+        } else if let Some(span) = self.copy(span)? {
+            self.pipeline.push(span);
+        }
+        Ok(())
+    }
+
+    /// Count a panic caught in a call from Python and log it on the `fastotel` logger.
+    fn panicked(&self, py: Python<'_>, call: &str, payload: &(dyn Any + Send)) {
+        self.pipeline.panicked();
+        let message = fastotel_export::panic_message(payload);
+        log_error(py, &format!("fastotel panicked in {call}: {message}"));
+    }
+
+    /// Log the panics the worker caught since the last call: it cannot reach Python itself, so they wait for the
+    /// next flush or shutdown until #14 hands them over as they happen.
+    fn log_worker_panics(&self, py: Python<'_>) {
+        for message in self.pipeline.take_panic_messages() {
+            log_error(
+                py,
+                &format!("fastotel's export worker panicked and lost a batch: {message}"),
+            );
+        }
+    }
+}
+
+/// The threads inside `detach_counted`, for the exit handler to wait for.
+static DETACHED: AtomicUsize = AtomicUsize::new(0);
+
+impl Processor {
+    /// `py.detach(f)`, counted in `DETACHED` until the thread holds the GIL again: until then, at exit, it is a
+    /// thread that would take the GIL back inside Rust code. Once `exiting(hang=True)` has been called on another
+    /// thread, it hangs instead: at exit every other thread is a daemon one, which the process ends.
+    fn detach_counted<T: Send>(&self, py: Python<'_>, f: impl Send + FnOnce() -> T) -> T {
+        struct Counted;
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DETACHED.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        DETACHED.fetch_add(1, Ordering::SeqCst);
+        let _counted = Counted;
+        py.detach(|| {
+            let done = f();
+            if self.hang_at_exit.load(Ordering::SeqCst) && self.pipeline.exited_elsewhere() {
+                DETACHED.fetch_sub(1, Ordering::SeqCst);
+                loop {
+                    thread::park();
+                }
+            }
+            done
+        })
+    }
+}
+
+/// The number of threads waiting in `force_flush` or `shutdown` without the GIL, or taking it back.
+#[pyfunction]
+fn detached() -> usize {
+    DETACHED.load(Ordering::SeqCst)
+}
+
+/// An error on the `fastotel` logger; a logger that fails is left alone, as there is nowhere else to report.
+fn log_error(py: Python<'_>, message: &str) {
+    let logged = py
+        .import(intern!(py, "logging"))
+        .and_then(|logging| logging.call_method1(intern!(py, "getLogger"), ("fastotel",)))
+        .and_then(|logger| logger.call_method1(intern!(py, "error"), (message,)));
+    if let Err(error) = logged {
+        error.write_unraisable(py, None);
     }
 }
 
@@ -455,7 +583,8 @@ impl<T> Copies<T> {
         // The lock is never held across a call into Python, which may switch threads while another one waits
         // for it with the GIL
         let copied = Arc::new(copy(object)?);
-        let mut entries = self.entries.lock().expect("never poisoned");
+        // A panic caught while it was held leaves the entries as they were: each is pushed whole
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         // Another thread may have copied it meanwhile
         if entries.len() < MAX_CACHED && !entries.iter().any(|(cached, _)| cached.is(object)) {
             entries.push((object.clone().unbind(), Arc::clone(&copied)));
@@ -464,7 +593,7 @@ impl<T> Copies<T> {
     }
 
     fn find(&self, object: &Bound<'_, PyAny>) -> Option<Arc<T>> {
-        let entries = self.entries.lock().expect("never poisoned");
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries
             .iter()
             .find(|(cached, _)| cached.is(object))
@@ -476,5 +605,9 @@ impl<T> Copies<T> {
 #[pymodule(gil_used = false)]
 mod _fastotel {
     #[pymodule_export]
-    use super::Processor;
+    use super::{Processor, detached};
+
+    // What a panic becomes in Python; the tests raise it from a span to make the copy panic
+    #[pymodule_export]
+    use super::PanicException;
 }

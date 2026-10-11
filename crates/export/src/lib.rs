@@ -15,4 +15,4 @@ pub use span::{
     Attributes, Context, Event, Link, Resource, Scope, SpanData, SpanKind, Status, StatusCode,
     Value,
 };
-pub use transport::{Compression, tls};
+pub use transport::{Compression, panic_message, tls};

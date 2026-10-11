@@ -1,5 +1,10 @@
+import atexit
 import logging
 import os
+import sys
+import threading
+import time
+import weakref
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
@@ -38,6 +43,9 @@ class OTLPSpanProcessor(SpanProcessor):
     The other arguments are those of `BatchSpanProcessor`, with its `OTEL_BSP_*` variables, defaults and checks: a
     batch leaves at `max_export_batch_size` spans or `schedule_delay_millis` after the previous export, a span ended
     while `max_queue_size` spans wait is dropped, and `shutdown` waits `export_timeout_millis` for the last export.
+
+    `TracerProvider` shuts its processors down at exit; without that, spans still queued at exit are lost. A panic
+    in the native code is caught, counted and logged on the `fastotel` logger; it never reaches the application.
     """
 
     def __init__(
@@ -113,16 +121,104 @@ class OTLPSpanProcessor(SpanProcessor):
             max_export_batch_size,
             export_timeout_millis,
         )
+        with _exit_lock:
+            _processors.add(self)
+            if _exited:
+                # Created by an exit handler that runs after fastotel's
+                self._native.exiting(_hang_at_exit())
 
     def on_end(self, span: ReadableSpan) -> None:
         self._native.on_end(span)
 
     def shutdown(self) -> None:
+        """
+        Exports what is queued, waiting up to `export_timeout_millis`, and stops the worker. Spans ended afterwards
+        are dropped and counted; a second call does nothing.
+        """
         self._native.shutdown()
 
-    def force_flush(self, timeout_millis: int = 30000) -> bool:
-        # A negative timeout is an expired one, not an OverflowError from the native side
-        return self._native.force_flush(max(timeout_millis, 0))
+    def force_flush(self, timeout_millis: float | None = 30000) -> bool:
+        """
+        Exports every span ended before the call. False when that takes longer than `timeout_millis`, and after
+        `shutdown`, as `BatchSpanProcessor` returns; None waits `export_timeout_millis`, as `BatchSpanProcessor` did
+        while it still honoured the timeout.
+        """
+        if timeout_millis is None:
+            timeout_millis = self._export_timeout_millis
+        # Negative or NaN is an expired timeout, too many milliseconds to hold no limit
+        return self._native.force_flush(timeout_millis)
+
+
+# Every processor alive, for the exit handler, and whether it has run
+_processors: "weakref.WeakSet[OTLPSpanProcessor]" = weakref.WeakSet()
+_exited = False
+_exit_lock = threading.Lock()
+# The frames of the calls into the native module
+_NATIVE_CALLS = frozenset(
+    {OTLPSpanProcessor.on_end.__code__, OTLPSpanProcessor.force_flush.__code__, OTLPSpanProcessor.shutdown.__code__}
+)
+# How long the exit handler waits for threads running Python code the native module called, and for threads that
+# only have to take the GIL back to leave it
+_EXIT_WAIT_SECONDS = 2.0
+_EXIT_WAIT_DETACHED_SECONDS = 10.0
+
+
+def _hang_at_exit() -> bool:
+    # Before 3.14 a thread back from a wait hangs rather than take the GIL back, as 3.14 hangs daemon threads; a
+    # build without the GIL (3.13t, built from source) gets no protection from it
+    return sys.version_info < (3, 14) and getattr(sys, "_is_gil_enabled", lambda: True)()
+
+
+@atexit.register
+def _at_exit() -> None:
+    """
+    Keeps daemon threads out of the native module before the interpreter finalizes.
+
+    Registered at import, so it runs after the exit handlers of the providers created later, which shut their
+    processors down. From here on, on other threads, `on_end` drops and counts spans without calling into Python,
+    and `force_flush` and `shutdown` return False without letting go of the GIL, ending the waits they are in. Before
+    3.14 CPython ends a daemon thread that takes the GIL during finalization with `pthread_exit`, which on glibc
+    unwinds its stack and aborts the process when Rust frames are on it, so a thread back from such a wait hangs
+    instead, and this waits until no other thread can take the GIL inside the native module.
+    """
+    global _exited
+    hang = _hang_at_exit()
+    with _exit_lock:
+        _exited = True
+        processors = list(_processors)
+    for processor in processors:
+        processor._native.exiting(hang)
+    if not hang:
+        return
+    started = time.monotonic()
+    while (inside := _inside_native_code()) is not None:
+        waited = time.monotonic() - started
+        if waited > _EXIT_WAIT_DETACHED_SECONDS or (inside == "python" and waited > _EXIT_WAIT_SECONDS):
+            break
+        # Lets those threads take the GIL and leave
+        time.sleep(0.001)
+
+
+def _inside_native_code() -> str | None:
+    """
+    How another thread can take the GIL inside Rust code, if one can: "detached" when it is back from a wait in
+    `force_flush` or `shutdown` without the GIL and does not hang, "python" when it runs Python code that the native
+    module called (a span's properties, a log), which shows as a frame above one of the calls into it. Otherwise
+    native code takes no GIL, so a thread whose topmost frame is the call itself is about to enter it, or back from
+    it, and harmless.
+    """
+    if _fastotel.detached():
+        return "detached"
+    current = threading.get_ident()
+    for ident, top in sys._current_frames().items():
+        frame = top
+        while ident != current and frame is not None:
+            if frame.f_code in _NATIVE_CALLS:
+                if frame is not top:
+                    return "python"
+                break
+            frame = frame.f_back  # type: ignore[assignment]
+    return None
 
 
 def _read(path: str | None) -> bytes | None:
