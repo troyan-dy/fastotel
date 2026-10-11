@@ -1,7 +1,7 @@
 # 0007. Flush, shutdown and exit: a queue closed by shutdown, daemon threads kept out at exit, panics caught
 
 - Status: accepted
-- Date: 2026-10-10
+- Date: 2026-10-11
 - Ticket: #12
 
 ## Context
