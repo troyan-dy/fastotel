@@ -15,6 +15,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - CI uses setup-uv 10.3.
 - A SessionStart hook sets the repository up in cloud sessions of Claude Code: it installs the Python and Rust
   dependencies and builds the extension, so the tests and linters run at once. It stays out of the sdist.
+- `make lint`, and so CI, runs wemake-python-styleguide through flake8 alongside ruff, configured in `setup.cfg`.
+  The code follows it; the batching settings of `BatchSpanProcessor` move to a module of their own, and the exit
+  handler records that it has run in an event rather than a global. Behaviour is unchanged.
 
 ## [0.9.0] - 2026-10-11
 

@@ -18,5 +18,8 @@ fi
 
 # The dev and bench groups, with the extension built into .venv; a second run finds it up to date
 uv sync --locked --group bench
+# The linters of make lint are there: ruff, and flake8 with wemake-python-styleguide
+uv run --no-sync ruff --version
+uv run --no-sync flake8 --version
 # The crates of cargo test and clippy
 cargo fetch --locked

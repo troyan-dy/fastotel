@@ -15,9 +15,10 @@ install: ## Build the extension and install it with the dev dependencies
 	uv sync --locked
 
 .PHONY: lint
-lint: ## Run ruff, mypy, cargo fmt and clippy
+lint: ## Run ruff, wemake-python-styleguide, mypy, cargo fmt and clippy
 	uv run ruff check .
 	uv run ruff format --check .
+	uv run flake8 .
 	uv run --group bench mypy
 	cargo fmt --all --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings

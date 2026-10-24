@@ -57,6 +57,8 @@ dev = [
   # from 3.15
   "trustme>=1.2 ; python_full_version < '3.15'",
   "types-protobuf>=5",
+  # make lint: the style rules ruff has not, through flake8; setup.cfg configures it
+  "wemake-python-styleguide>=1.8.1",
 ]
 
 [build-system]
