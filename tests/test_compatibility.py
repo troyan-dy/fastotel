@@ -4,7 +4,8 @@ The compatibility test of #1: the same spans go through the reference `OTLPSpanE
 """
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from types import MappingProxyType
 from typing import Any, TypeVar, overload
 
 import pytest
@@ -14,18 +15,20 @@ from google.protobuf.internal import api_implementation
 from google.protobuf.message import Message
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from opentelemetry import trace
+from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.trace import Link, NonRecordingSpan, SpanContext, SpanKind, Status, StatusCode, TraceFlags
-from opentelemetry.trace.span import TraceState
+from opentelemetry.trace.propagation import set_span_in_context
+from opentelemetry.trace.span import INVALID_SPAN, Span, TraceState
 from receiver import FakeReceiver
 from spans import INT64_MAX, INT64_MIN, SAMPLED, end_every_kind_of_span, tracer
 
-_T = TypeVar("_T")
+_Member = TypeVar("_Member")
+_Group = tuple[str, list[_Member]]
 # A ScopeSpans as compared: the scope, its schema URL and the spans, sorted
 Scope = tuple[str, list[str]]
 # A ResourceSpans as compared: the resource with its schema URL, and its scopes in order
@@ -66,11 +69,13 @@ def grouped(requests: list[ExportTraceServiceRequest]) -> Grouped:
     return [(resource, [(scope, sorted(spans)) for scope, spans in scopes]) for resource, scopes in resources]
 
 
-def _group(groups: list[tuple[str, list[_T]]], key: str, taken: list[int]) -> list[_T]:
+def _group(groups: list[_Group[_Member]], key: str, taken: list[int]) -> list[_Member]:
     """
     The values of the group `key` that no group of the same request has taken yet, a new group if there is none.
     """
-    index = next((i for i, (k, _) in enumerate(groups) if k == key and i not in taken), len(groups))
+    index = next(
+        (position for position, (name, _) in enumerate(groups) if name == key and position not in taken), len(groups)
+    )
     if index == len(groups):
         groups.append((key, []))
     taken.append(index)
@@ -111,7 +116,7 @@ def test_the_comparison_merges_batches_and_tells_scopes_apart() -> None:
     other.resource_spans.add().scope_spans.add(schema_url="other").spans.add(name="a")
 
     [(_, [(_, spans)])] = grouped([request, request])
-    assert spans == ['name: "a"\n'] * 2
+    assert spans == ['name: "a"\n', 'name: "a"\n']
     assert grouped([request]) != grouped([other])
     split = ExportTraceServiceRequest()
     split.resource_spans.add().scope_spans.add().spans.add(name="a")
@@ -148,38 +153,40 @@ class _Unreadable(Sequence[int]):
 
 
 def _self_referencing() -> list[Any]:
-    value: list[Any] = [1]
-    value.append(value)
-    return value
+    looped: list[Any] = [1]
+    looped.append(looped)
+    return looped
 
 
 def _nested(depth: int, leaf: Any = 1) -> Any:
-    value = leaf
+    nested = leaf
     for _ in range(depth):
-        value = (value,)
-    return value
+        nested = (nested,)
+    return nested
 
 
 def _nested_mapping(depth: int, leaf: Any) -> Any:
-    value = leaf
+    nested = leaf
     for _ in range(depth):
-        value = {"k": value}
-    return value
+        nested = {"k": nested}
+    return nested
 
 
 # Values the SDK lets through but OTLP cannot express; the reference leaves out the attribute, and so does fastotel
-UNEXPRESSIBLE = {
-    "int above int64": INT64_MAX + 1,
-    "int below int64": INT64_MIN - 1,
-    "int beyond int64 in a sequence": (1, INT64_MAX + 1),
-    "int beyond int64 in a mapping": {"inner": {"deep": 2**64}},
-    "str with a lone surrogate": "a\ud800b",
-    "str with a lone surrogate in a sequence": ("ok", "\udfff"),
-    "key with a lone surrogate in a mapping": {"\ud800": 1},
-}
+UNEXPRESSIBLE = MappingProxyType(
+    {
+        "int above int64": INT64_MAX + 1,
+        "int below int64": INT64_MIN - 1,
+        "int beyond int64 in a sequence": (1, INT64_MAX + 1),
+        "int beyond int64 in a mapping": {"inner": {"deep": 2**64}},
+        "str with a lone surrogate": "a\ud800b",
+        "str with a lone surrogate in a sequence": ("ok", "\udfff"),
+        "key with a lone surrogate in a mapping": {"\ud800": 1},
+    }
+)
 _UPB = api_implementation.Type() == "upb"
-_UNEXPRESSIBLE = [
-    *(pytest.param(value, id=case) for case, value in UNEXPRESSIBLE.items()),
+_UNEXPRESSIBLE = (
+    *(pytest.param(odd, id=case) for case, odd in UNEXPRESSIBLE.items()),
     # With upb the reference cannot build a message nested more than 100 deep and leaves the attribute out; a bit
     # less deep, it loses the batch or sends what decoders refuse. Pure-Python protobuf sends it whatever the depth
     pytest.param(
@@ -187,19 +194,20 @@ _UNEXPRESSIBLE = [
         id="nested deeper than protobuf decoders accept",
         marks=pytest.mark.skipif(not _UPB, reason="the reference sends it on pure-Python protobuf"),
     ),
-]
+)
 
 
-@pytest.mark.parametrize("value", _UNEXPRESSIBLE)
-def test_an_attribute_otlp_cannot_express_is_left_out_as_by_the_reference(value: Any) -> None:
+@pytest.mark.parametrize("odd", _UNEXPRESSIBLE)
+def test_an_attribute_otlp_cannot_express_is_left_out_as_by_the_reference(odd: Any) -> None:
     def end_spans(*processors: SpanProcessor) -> None:
-        provider = TracerProvider(resource=Resource({"service.name": "app", "odd": value}))
+        provider = TracerProvider(resource=Resource({"service.name": "app", "odd": odd}))
         for processor in processors:
             provider.add_span_processor(processor)
-        app = tracer(provider, "app", attributes={"odd": value, "kept": 1})
-        with app.start_as_current_span("span", attributes={"before": 1, "odd": value, "after": 2}) as span:
-            span.add_event("event", {"odd": value, "kept": 1})
-        app.start_span("linked", links=[Link(span.get_span_context(), {"odd": value, "kept": 1})]).end()
+        app = tracer(provider, "app", attributes={"odd": odd, "kept": 1})
+        with app.start_as_current_span("span", attributes={"before": 1, "odd": odd, "after": 2}) as span:
+            span.add_event("event", {"odd": odd, "kept": 1})
+            linked = span.get_span_context()
+        app.start_span("linked", links=[Link(linked, {"odd": odd, "kept": 1})]).end()
 
     fastotel, reference = through_both(end_spans)
 
@@ -235,23 +243,25 @@ def test_an_attribute_is_left_out_when_the_request_would_nest_deeper_than_decode
 
 
 # Attributes a ReadableSpan can hold when it is built by hand, without the SDK's cleaning
-UNCLEANED: dict[str, tuple[Any, Any]] = {
-    "a type OTLP has no value for": ("odd", _Unknown()),
-    "a type OTLP has no value for, in a sequence": ("odd", (1, _Unknown())),
-    "a self-referencing list": ("odd", _self_referencing()),
-    "a sequence whose iteration fails": ("odd", _Unreadable()),
-    "a key that is not a str": (1, "odd"),
-}
+UNCLEANED: Mapping[str, tuple[Any, Any]] = MappingProxyType(
+    {
+        "a type OTLP has no value for": ("odd", _Unknown()),
+        "a type OTLP has no value for, in a sequence": ("odd", (1, _Unknown())),
+        "a self-referencing list": ("odd", _self_referencing()),
+        "a sequence whose iteration fails": ("odd", _Unreadable()),
+        "a key that is not a str": (1, "odd"),
+    }
+)
 
 
 @pytest.mark.parametrize("attribute", UNCLEANED.values(), ids=UNCLEANED.keys())
 def test_an_attribute_the_sdk_would_have_cleaned_is_left_out_as_by_the_reference(attribute: tuple[Any, Any]) -> None:
-    key, value = attribute
+    key, held = attribute
     span = ReadableSpan(
         name="by hand",
         context=SpanContext(trace_id=1, span_id=2, is_remote=False, trace_flags=SAMPLED),
         resource=Resource({}),
-        attributes={"before": 1, key: value, "after": 2},
+        attributes={"before": 1, key: held, "after": 2},
         start_time=1,
         end_time=2,
     )
@@ -268,11 +278,13 @@ def test_an_attribute_the_sdk_would_have_cleaned_is_left_out_as_by_the_reference
 
 
 # Names protobuf cannot take for a string field; the reference then loses the batch, fastotel only the span
-UNENCODABLE_NAMES = {
-    "a lone surrogate": "\ud800",
-    "bytes that are not UTF-8": b"\xff",
-    "neither str, bytes nor None": 1,
-}
+UNENCODABLE_NAMES = MappingProxyType(
+    {
+        "a lone surrogate": "\ud800",
+        "bytes that are not UTF-8": b"\xff",
+        "neither str, bytes nor None": 1,
+    }
+)
 
 
 @pytest.mark.parametrize("name", UNENCODABLE_NAMES.values(), ids=UNENCODABLE_NAMES.keys())
@@ -337,11 +349,11 @@ _SCALARS = (
     | st.integers(INT64_MIN, INT64_MAX)
     | st.integers()
     | st.floats()
-    | st.sampled_from([math.nan, math.inf, -math.inf, -0.0])
+    | st.sampled_from([math.nan, math.inf, -math.inf, -float(0)])
     | _ANY_TEXT
     | st.binary(max_size=8)
 )
-_VALUES = st.recursive(
+_ATTRIBUTE_VALUES = st.recursive(
     _SCALARS,
     lambda children: (
         st.lists(children, max_size=4).map(tuple)
@@ -357,7 +369,7 @@ _HOMOGENEOUS = st.one_of(
     st.lists(st.floats(), max_size=4),
     st.lists(_TEXT, max_size=4),
 ).map(tuple)
-_ATTRIBUTES = st.dictionaries(_KEYS, _VALUES | _HOMOGENEOUS, max_size=6)
+_ATTRIBUTES = st.dictionaries(_KEYS, _ATTRIBUTE_VALUES | _HOMOGENEOUS, max_size=6)
 _IDS = st.integers(1, 2**64 - 1)
 _CONTEXTS = st.builds(
     SpanContext,
@@ -425,16 +437,9 @@ def test_generated_spans_are_sent_as_the_reference_sends_them(
         }
         with tracers["a"].start_as_current_span("local parent") as local:
             for shape in shapes:
-                parent = shape["parent"]
-                if parent is None:
-                    context = trace.set_span_in_context(trace.INVALID_SPAN)
-                elif parent == "local":
-                    context = trace.set_span_in_context(local)
-                else:
-                    context = trace.set_span_in_context(NonRecordingSpan(parent))
                 span = tracers[shape["scope"]].start_span(
                     shape["name"],
-                    context=context,
+                    context=_context(shape["parent"], local),
                     kind=shape["kind"],
                     attributes=shape["attributes"],
                     links=[Link(link_context, attributes) for link_context, attributes in shape["links"]],
@@ -447,3 +452,13 @@ def test_generated_spans_are_sent_as_the_reference_sends_them(
     fastotel, reference = through_both(end_spans)
 
     assert fastotel == reference
+
+
+def _context(parent: SpanContext | str | None, local: Span) -> Context:
+    # A generated span's parent: none, the local span, or a remote one
+    if parent is None:
+        return set_span_in_context(INVALID_SPAN)
+    if parent == "local":
+        return set_span_in_context(local)
+    assert isinstance(parent, SpanContext)
+    return set_span_in_context(NonRecordingSpan(parent))

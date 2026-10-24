@@ -36,8 +36,8 @@ def _export(processor: OTLPSpanProcessor, spans: int = 1) -> float:
     """
     Sends `spans` spans in one batch and returns how long the flush took.
     """
-    for i in range(spans):
-        processor.on_end(_span(f"span {i}"))
+    for index in range(spans):
+        processor.on_end(_span(f"span {index}"))
     started = time.monotonic()
     assert processor.force_flush()
     return time.monotonic() - started
@@ -123,7 +123,7 @@ def test_a_retry_after_beyond_the_timeout_gives_up_at_once(receiver: FakeReceive
 
 
 def test_gives_up_after_six_attempts(receiver: FakeReceiver) -> None:
-    receiver.reply(*[Reply(503, {"Retry-After": "0"})] * 10)
+    receiver.reply(*(Reply(503, {"Retry-After": "0"}) for _ in range(10)))
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
     _export(processor)
     assert len(receiver.received) == 6
@@ -132,7 +132,7 @@ def test_gives_up_after_six_attempts(receiver: FakeReceiver) -> None:
 
 
 def test_retries_stay_within_the_timeout(receiver: FakeReceiver) -> None:
-    receiver.reply(*[Reply(503)] * 10)
+    receiver.reply(*(Reply(503) for _ in range(10)))
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, timeout=1.8)
     took = _export(processor)
     # After about 1 s the second backoff, 2 s give or take 20%, would end after the timeout: no third attempt
@@ -145,8 +145,8 @@ def test_retries_stay_within_the_timeout(receiver: FakeReceiver) -> None:
 def test_a_shutdown_that_stops_waiting_ends_the_retries_and_the_exports(receiver: FakeReceiver) -> None:
     receiver.reply(Reply(503, {"Retry-After": "1"}))
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, export_timeout_millis=300, max_export_batch_size=2)
-    for i in range(5):
-        processor.on_end(_span(f"span {i}"))
+    for index in range(5):
+        processor.on_end(_span(f"span {index}"))
     # The first batch is out before shutdown starts waiting
     assert len(receiver.wait_for_requests(1)) == 1
     started = time.monotonic()

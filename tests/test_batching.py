@@ -34,7 +34,9 @@ class _NoExport(SpanExporter):
         return SpanExportResult.SUCCESS
 
     def shutdown(self) -> None:
-        pass
+        """
+        Holds nothing to release.
+        """
 
 
 # The effective settings, or the error at construction, and what was logged
@@ -85,7 +87,7 @@ def _fastotel(caplog: pytest.LogCaptureFixture, kwargs: dict[str, Any]) -> Outco
         # What int() takes
         ({"OTEL_BSP_MAX_QUEUE_SIZE": " 1_000 ", "OTEL_BSP_MAX_EXPORT_BATCH_SIZE": "+10"}, {}),
         # Not integers: the default and an error log
-        *[({name: value}, {}) for name in VARIABLES for value in ("", "abc", "1.5", "0x10")],
+        *[({env_name: invalid}, {}) for env_name in VARIABLES for invalid in ("", "abc", "1.5", "0x10")],
         # Out of range
         ({"OTEL_BSP_MAX_QUEUE_SIZE": "0"}, {}),
         ({"OTEL_BSP_MAX_QUEUE_SIZE": "-1"}, {}),
@@ -118,8 +120,8 @@ def test_reads_the_settings_as_batch_span_processor_does(
 ) -> None:
     for name in VARIABLES:
         monkeypatch.delenv(name, raising=False)
-    for name, value in environ.items():
-        monkeypatch.setenv(name, value)
+    for name, setting in environ.items():
+        monkeypatch.setenv(name, setting)
     caplog.set_level(logging.DEBUG)
 
     reference = _reference(caplog, kwargs)
@@ -266,10 +268,10 @@ def test_memory_stays_bounded_while_the_receiver_is_down(down: str) -> None:
     count = 50_000
     endpoint = _closed_port_endpoint() if down == "refusing" else ""
     script = textwrap.dedent(_PUSH_MANY).format(tests=str(Path(__file__).parent), endpoint=endpoint, count=count)
-    result = subprocess.run(  # noqa: S603 - the test's own interpreter and script
+    completed = subprocess.run(  # noqa: S603 - the test's own interpreter and script
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, check=True
     )
-    grown, dropped = map(int, result.stdout.split())
+    grown, dropped = map(int, completed.stdout.split())
 
     # Each span holds about 2 KB: kept, they would take 100 MB; the queue holds 2048 of them and a batch of 512
     assert grown < 32 * 2**20

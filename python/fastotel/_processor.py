@@ -1,6 +1,4 @@
 import atexit
-import logging
-import os
 import sys
 import threading
 import time
@@ -8,23 +6,12 @@ import weakref
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
+from types import FrameType
 from urllib.parse import urlsplit
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
-from fastotel import _exporter, _fastotel
-
-# The variables and defaults of BatchSpanProcessor
-OTEL_BSP_MAX_QUEUE_SIZE = "OTEL_BSP_MAX_QUEUE_SIZE"
-OTEL_BSP_SCHEDULE_DELAY = "OTEL_BSP_SCHEDULE_DELAY"
-OTEL_BSP_MAX_EXPORT_BATCH_SIZE = "OTEL_BSP_MAX_EXPORT_BATCH_SIZE"
-OTEL_BSP_EXPORT_TIMEOUT = "OTEL_BSP_EXPORT_TIMEOUT"
-_DEFAULT_MAX_QUEUE_SIZE = 2048
-_DEFAULT_SCHEDULE_DELAY_MILLIS = 5000
-_DEFAULT_MAX_EXPORT_BATCH_SIZE = 512
-_DEFAULT_EXPORT_TIMEOUT_MILLIS = 30000
-
-logger = logging.getLogger("fastotel")
+from fastotel import _batch, _exporter, _fastotel
 
 
 class OTLPSpanProcessor(SpanProcessor):
@@ -48,7 +35,7 @@ class OTLPSpanProcessor(SpanProcessor):
     in the native code is caught, counted and logged on the `fastotel` logger; it never reaches the application.
     """
 
-    def __init__(
+    def __init__(  # noqa: WPS211 - the arguments of OTLPSpanExporter and BatchSpanProcessor
         self,
         *,
         endpoint: str | None = None,
@@ -80,29 +67,11 @@ class OTLPSpanProcessor(SpanProcessor):
         self._timeout = _exporter.timeout(timeout)
         self._headers = _exporter.headers(headers)
 
-        if max_queue_size is None:
-            max_queue_size = _int_from_environ(OTEL_BSP_MAX_QUEUE_SIZE, _DEFAULT_MAX_QUEUE_SIZE)
-        if schedule_delay_millis is None:
-            schedule_delay_millis = _int_from_environ(OTEL_BSP_SCHEDULE_DELAY, _DEFAULT_SCHEDULE_DELAY_MILLIS)
-        if max_export_batch_size is None:
-            max_export_batch_size = _int_from_environ(OTEL_BSP_MAX_EXPORT_BATCH_SIZE, _DEFAULT_MAX_EXPORT_BATCH_SIZE)
-        if export_timeout_millis is None:
-            export_timeout_millis = _int_from_environ(OTEL_BSP_EXPORT_TIMEOUT, _DEFAULT_EXPORT_TIMEOUT_MILLIS)
-        # The checks and messages of BatchSpanProcessor
-        if max_queue_size <= 0:
-            raise ValueError("max_queue_size must be a positive integer.")
-        # `not > 0` also refuses NaN, which the SDK lets through to spin its worker
-        if not schedule_delay_millis > 0:
-            raise ValueError("schedule_delay_millis must be positive.")
-        if max_export_batch_size <= 0:
-            raise ValueError("max_export_batch_size must be a positive integer.")
-        if max_export_batch_size > max_queue_size:
-            raise ValueError("max_export_batch_size must be less than or equal to max_queue_size.")
-
-        self._max_queue_size = max_queue_size
-        self._schedule_delay_millis = schedule_delay_millis
-        self._max_export_batch_size = max_export_batch_size
-        self._export_timeout_millis = export_timeout_millis
+        self._max_queue_size = _batch.max_queue_size(max_queue_size)
+        self._schedule_delay_millis = _batch.schedule_delay_millis(schedule_delay_millis)
+        self._max_export_batch_size = _batch.max_export_batch_size(max_export_batch_size)
+        self._export_timeout_millis = _batch.export_timeout_millis(export_timeout_millis)
+        _batch.check(self._max_queue_size, self._schedule_delay_millis, self._max_export_batch_size)
         # As by requests, the TLS files matter only to an https:// endpoint; a file that cannot be read or holds no
         # certificate or key raises here, where the reference fails every export
         https = urlsplit(self._endpoint).scheme == "https"
@@ -115,15 +84,15 @@ class OTLPSpanProcessor(SpanProcessor):
             _read(self._certificate_file) if https else None,
             client_certificate,
             # A key without a certificate is not used, and a certificate without a key file holds the key
-            _read(self._client_key_file) if client_certificate is not None else None,
-            max_queue_size,
-            schedule_delay_millis,
-            max_export_batch_size,
-            export_timeout_millis,
+            None if client_certificate is None else _read(self._client_key_file),
+            self._max_queue_size,
+            self._schedule_delay_millis,
+            self._max_export_batch_size,
+            self._export_timeout_millis,
         )
         with _exit_lock:
             _processors.add(self)
-            if _exited:
+            if _exited.is_set():
                 # Created by an exit handler that runs after fastotel's
                 self._native.exiting(_hang_at_exit())
 
@@ -151,22 +120,25 @@ class OTLPSpanProcessor(SpanProcessor):
 
 # Every processor alive, for the exit handler, and whether it has run
 _processors: "weakref.WeakSet[OTLPSpanProcessor]" = weakref.WeakSet()
-_exited = False
+_exited = threading.Event()
 _exit_lock = threading.Lock()
 # The frames of the calls into the native module
 _NATIVE_CALLS = frozenset(
-    {OTLPSpanProcessor.on_end.__code__, OTLPSpanProcessor.force_flush.__code__, OTLPSpanProcessor.shutdown.__code__}
+    (OTLPSpanProcessor.on_end.__code__, OTLPSpanProcessor.force_flush.__code__, OTLPSpanProcessor.shutdown.__code__)
 )
 # How long the exit handler waits for threads running Python code the native module called, and for threads that
 # only have to take the GIL back to leave it
 _EXIT_WAIT_SECONDS = 2.0
 _EXIT_WAIT_DETACHED_SECONDS = 10.0
+# How often it looks again, letting those threads take the GIL and leave in between
+_EXIT_POLL_SECONDS = 0.001
 
 
 def _hang_at_exit() -> bool:
     # Before 3.14 a thread back from a wait hangs rather than take the GIL back, as 3.14 hangs daemon threads; a
     # build without the GIL (3.13t, built from source) gets no protection from it
-    return sys.version_info < (3, 14) and getattr(sys, "_is_gil_enabled", lambda: True)()
+    is_gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)
+    return sys.version_info < (3, 14) and is_gil_enabled()
 
 
 @atexit.register
@@ -181,22 +153,25 @@ def _at_exit() -> None:
     unwinds its stack and aborts the process when Rust frames are on it, so a thread back from such a wait hangs
     instead, and this waits until no other thread can take the GIL inside the native module.
     """
-    global _exited
     hang = _hang_at_exit()
     with _exit_lock:
-        _exited = True
+        _exited.set()
         processors = list(_processors)
     for processor in processors:
         processor._native.exiting(hang)
-    if not hang:
-        return
+    if hang:
+        _wait_for_native_code()
+
+
+def _wait_for_native_code() -> None:
     started = time.monotonic()
-    while (inside := _inside_native_code()) is not None:
+    inside = _inside_native_code()
+    while inside is not None:
         waited = time.monotonic() - started
         if waited > _EXIT_WAIT_DETACHED_SECONDS or (inside == "python" and waited > _EXIT_WAIT_SECONDS):
             break
-        # Lets those threads take the GIL and leave
-        time.sleep(0.001)
+        time.sleep(_EXIT_POLL_SECONDS)
+        inside = _inside_native_code()
 
 
 def _inside_native_code() -> str | None:
@@ -211,24 +186,20 @@ def _inside_native_code() -> str | None:
         return "detached"
     current = threading.get_ident()
     for ident, top in sys._current_frames().items():
-        frame = top
-        while ident != current and frame is not None:
-            if frame.f_code in _NATIVE_CALLS:
-                if frame is not top:
-                    return "python"
-                break
-            frame = frame.f_back  # type: ignore[assignment]
+        if ident != current and _called_from_native_code(top):
+            return "python"
     return None
+
+
+def _called_from_native_code(top: FrameType) -> bool:
+    # Whether a call into the native module is on the stack below the topmost frame
+    frame: FrameType | None = top
+    while frame is not None:
+        if frame.f_code in _NATIVE_CALLS:
+            return frame is not top
+        frame = frame.f_back
+    return False
 
 
 def _read(path: str | None) -> bytes | None:
     return Path(path).read_bytes() if path else None
-
-
-def _int_from_environ(name: str, default: int) -> int:
-    # As BatchSpanProcessor reads its variables: int() of the value, or the default and the same error log
-    try:
-        return int(os.environ.get(name, default))
-    except ValueError:
-        logger.exception("Unable to parse value for %s as integer. Defaulting to %s.", name, default)
-        return default

@@ -27,6 +27,11 @@ from bench.scenarios import SCENARIOS
 from bench.sink import running_sink, stats
 
 RATES = (1_000, 5_000, 10_000)
+# Worker processes of pyperf, and how long each scenario and rate runs to count lost spans by default
+PROCESSES = 12
+LOST_SECONDS = 10.0
+# The share of spans lost, by scenario and rate, as `.lost.json` holds it
+_Losses = dict[str, dict[int, float | None]]
 
 
 @cache
@@ -55,7 +60,7 @@ def _workload(loops: int, scenario: str, sink: str, rate: int, cpu_log: str) -> 
         "gil": _gil_enabled(),
     }
     with Path(cpu_log).open("a") as log:
-        log.write(json.dumps(record) + "\n")
+        log.write(f"{json.dumps(record)}\n")
     return usage.seconds
 
 
@@ -67,13 +72,19 @@ def lost(scenario: str, sink: str, rate: int, seconds: float) -> float | None:
     setup = SCENARIOS[scenario].setup(sink)
     tracer = setup.provider.get_tracer("fastotel.bench")
     before = stats(sink)["spans"]
+    created = _create(tracer, rate, seconds)
+    setup.shutdown()
+    received = stats(sink)["spans"] - before
+    return 1 - received / created if received else None
+
+
+def _create(tracer: Tracer, rate: int, seconds: float) -> int:
+    # The spans created at `rate` for `seconds`
     created = 0
     start = perf_counter()
     while perf_counter() - start < seconds:
         created += workload.paced(1_000, tracer, rate).spans
-    setup.shutdown()
-    received = stats(sink)["spans"] - before
-    return 1 - received / created if received else None
+    return created
 
 
 def cpu_log_of(output: str) -> Path:
@@ -82,6 +93,11 @@ def cpu_log_of(output: str) -> Path:
 
 def lost_of(output: str) -> Path:
     return Path(output).with_suffix(".lost.json")
+
+
+def _python_build() -> str:
+    suffix = "t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""
+    return f"{platform.python_version()}{suffix}"
 
 
 def _gil_enabled() -> bool:
@@ -97,18 +113,20 @@ def main() -> None:
     runner = pyperf.Runner(
         # One value lasts long enough to take in a few exports even at 1k spans/s (a batch is 512 spans)
         min_time=1.0,
-        processes=12,
+        processes=PROCESSES,
         program_args=("-m", "bench.run"),
         add_cmdline_args=_forward,
     )
     runner.argparser.add_argument("--sink", help=argparse.SUPPRESS)
     runner.argparser.add_argument("--cpu-log", help=argparse.SUPPRESS)
     runner.argparser.add_argument(
-        "--lost-seconds", type=float, default=10.0, help="how long to run each scenario and rate to count lost spans"
+        "--lost-seconds",
+        type=float,
+        default=LOST_SECONDS,
+        help="how long to run each scenario and rate to count lost spans",
     )
     args = runner.parse_args()
-    gil_disabled = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
-    runner.metadata["fastotel_python"] = platform.python_version() + ("t" if gil_disabled else "")
+    runner.metadata["fastotel_python"] = _python_build()
     # A free-threaded build turns the GIL back on for an extension that does not declare itself safe
     runner.metadata["fastotel_gil"] = "on" if _gil_enabled() else "off"
 
@@ -124,10 +142,17 @@ def main() -> None:
         args.sink = sink
         _register(runner, args)
         # In this process, after the workers: nothing else runs on the machine meanwhile
-        losses = {
-            scenario: {rate: lost(scenario, sink, rate, args.lost_seconds) for rate in RATES} for scenario in SCENARIOS
-        }
+        losses = _losses(sink, args.lost_seconds)
     lost_of(args.output).write_text(json.dumps(losses))
+
+
+def _losses(sink: str, seconds: float) -> _Losses:
+    losses: _Losses = {}
+    for scenario in SCENARIOS:
+        losses[scenario] = {}
+        for rate in RATES:
+            losses[scenario][rate] = lost(scenario, sink, rate, seconds)
+    return losses
 
 
 def _register(runner: pyperf.Runner, args: argparse.Namespace) -> None:

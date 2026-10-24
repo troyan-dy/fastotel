@@ -142,7 +142,7 @@ def _no_compression() -> Any:
         ({"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer abc def"}, {}),
         # Invalid entries are skipped with a warning
         ({"OTEL_EXPORTER_OTLP_HEADERS": 'novalue,=b,a=b;c,q="x",ok=1'}, {}),
-        ({"OTEL_EXPORTER_OTLP_HEADERS": "a=b\\c,d=e"}, {}),
+        ({"OTEL_EXPORTER_OTLP_HEADERS": r"a=b\c,d=e"}, {}),
         # Arguments merge into the variable, per name, any case
         ({"OTEL_EXPORTER_OTLP_HEADERS": "a=1,b=2"}, {"headers": {"A": "3", "c": "4"}}),
         ({"OTEL_EXPORTER_OTLP_HEADERS": "a=1"}, {"headers": {}}),
@@ -154,15 +154,15 @@ def _no_compression() -> Any:
         ({"OTEL_EXPORTER_OTLP_TIMEOUT": "7", "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT": "3"}, {}),
         ({"OTEL_EXPORTER_OTLP_TIMEOUT": "7", "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT": ""}, {}),
         *[
-            ({"OTEL_EXPORTER_OTLP_TIMEOUT": value}, {})
-            for value in ("abc", "5s", "1e3", "1_0", "0", "-1", "nan", "inf")
+            ({"OTEL_EXPORTER_OTLP_TIMEOUT": timeout}, {})
+            for timeout in ("abc", "5s", "1e3", "1_0", "0", "-1", "nan", "inf")
         ],
         ({"OTEL_EXPORTER_OTLP_TIMEOUT": "abc"}, {"timeout": 2.5}),
         ({"OTEL_EXPORTER_OTLP_TIMEOUT": "5"}, {"timeout": 0}),
         # Compression: none, gzip or deflate, any case; anything else is none with a warning
         *[
-            ({"OTEL_EXPORTER_OTLP_COMPRESSION": value}, {})
-            for value in ("gzip", " GZip ", "deflate", "none", "brotli", " ", "")
+            ({"OTEL_EXPORTER_OTLP_COMPRESSION": compression}, {})
+            for compression in ("gzip", " GZip ", "deflate", "none", "brotli", " ", "")
         ],
         ({"OTEL_EXPORTER_OTLP_COMPRESSION": "gzip", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION": "none"}, {}),
         ({"OTEL_EXPORTER_OTLP_COMPRESSION": "gzip", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION": ""}, {}),
@@ -211,11 +211,11 @@ def test_reads_the_configuration_as_the_reference_exporter_does(
 ) -> None:
     # The lowest job of CI runs without the reference
     pytest.importorskip("opentelemetry.exporter.otlp.proto.http")
-    for name, value in environ.items():
-        monkeypatch.setenv(name, value)
+    for name, setting in environ.items():
+        monkeypatch.setenv(name, setting)
     caplog.set_level(logging.DEBUG)
     # The reference's enums are made here, once it is known to be there
-    kwargs = {name: value() if callable(value) else value for name, value in kwargs.items()}
+    kwargs = {keyword: argument() if callable(argument) else argument for keyword, argument in kwargs.items()}
 
     reference = _reference(caplog, kwargs)
     assert _fastotel(caplog, kwargs) == reference
@@ -232,7 +232,7 @@ def test_the_request_carries_the_configured_headers_to_the_configured_endpoint(
     receiver: FakeReceiver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = receiver.endpoint.removesuffix("/v1/traces")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", base + "/")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", f"{base}/")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Basic%20dXNlcg%3D%3D,tenant=env")
     processor = OTLPSpanProcessor(headers={"Tenant": "argument", "x-extra": "1"})
     processor.on_end(_span())
@@ -304,13 +304,13 @@ def test_a_header_http_cannot_carry_raises(
     environ: dict[str, str], kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A deliberate difference (ADR 0005): the reference takes it and then fails every export
-    for name, value in environ.items():
-        monkeypatch.setenv(name, value)
+    for name, setting in environ.items():
+        monkeypatch.setenv(name, setting)
     with pytest.raises(ValueError, match="header"):
         OTLPSpanProcessor(**kwargs)
 
 
-@pytest.mark.parametrize("timeout", [math.nan, -1.0, 0.0, math.inf, 1e300])
+@pytest.mark.parametrize("timeout", [math.nan, -1.0, float(0), math.inf, 1e300])
 def test_any_float_timeout_is_taken(timeout: float) -> None:
     # As by the reference, none is refused at construction
     processor = OTLPSpanProcessor(timeout=timeout)
@@ -318,7 +318,7 @@ def test_any_float_timeout_is_taken(timeout: float) -> None:
     processor.shutdown()
 
 
-@pytest.mark.parametrize("timeout", [0.0, -1.0, math.nan, math.inf, 1e10])
+@pytest.mark.parametrize("timeout", [float(0), -1.0, math.nan, math.inf, 1e10])
 def test_a_timeout_requests_cannot_wait_for_fails_each_request_at_once(receiver: FakeReceiver, timeout: float) -> None:
     # As with the reference, whose requests cannot set a socket timeout beyond 2^63 ns
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, timeout=timeout)

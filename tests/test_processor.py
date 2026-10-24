@@ -4,12 +4,12 @@ import signal
 import sys
 import time
 from collections.abc import Iterable, Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-import fastotel
 import pytest
-from fastotel import OTLPSpanProcessor
+from fastotel import OTLPSpanProcessor, __all__
 from opentelemetry import trace
 from opentelemetry.proto.common.v1.common_pb2 import KeyValue
 from opentelemetry.proto.trace.v1.trace_pb2 import Span as SpanProto
@@ -189,11 +189,9 @@ def _export_threads() -> int:
     # Counted rather than looked for: a processor another test left running has a thread of the same name
     names = []
     for comm in Path("/proc/self/task").glob("*/comm"):
-        try:
+        # A thread that ended since the listing, a receiver's among others
+        with suppress(FileNotFoundError):
             names.append(comm.read_text().strip())
-        except FileNotFoundError:
-            # A thread that ended since the listing, a receiver's among others
-            pass
     return names.count("fastotel-export")
 
 
@@ -233,8 +231,10 @@ def test_a_child_forked_after_the_first_span_exits_cleanly(receiver: FakeReceive
         provider.shutdown()
         os._exit(0)
     deadline = time.monotonic() + 10
-    while (waited := os.waitpid(pid, os.WNOHANG)) == (0, 0) and time.monotonic() < deadline:
+    waited = os.waitpid(pid, os.WNOHANG)
+    while waited == (0, 0) and time.monotonic() < deadline:
         time.sleep(0.01)
+        waited = os.waitpid(pid, os.WNOHANG)
     if waited == (0, 0):
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
@@ -255,14 +255,15 @@ def test_splits_what_is_queued_into_batches_of_512(receiver: FakeReceiver) -> No
         tracer.start_span("span").end()
     provider.shutdown()
 
-    sizes = [len(request.resource_spans[0].scope_spans[0].spans) for request in receiver.requests]
+    scopes = [request.resource_spans[0].scope_spans[0] for request in receiver.requests]
+    sizes = [len(scope.spans) for scope in scopes]
     assert sorted(sizes) == [276, 512, 512]
 
 
 def test_a_processor_dropped_without_shutdown_exports_what_is_queued(receiver: FakeReceiver) -> None:
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint)
     processor.on_end(_ended_span(TracerProvider()))
-    del processor
+    del processor  # noqa: WPS420 - the last reference goes, as the test is about
     gc.collect()
 
     deadline = time.monotonic() + 10
@@ -289,4 +290,4 @@ def test_on_end_drops_what_it_cannot_copy_without_raising(receiver: FakeReceiver
 
 def test_is_a_span_processor_exported_by_the_package() -> None:
     assert isinstance(OTLPSpanProcessor(), SpanProcessor)
-    assert "OTLPSpanProcessor" in fastotel.__all__
+    assert "OTLPSpanProcessor" in __all__

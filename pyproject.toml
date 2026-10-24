@@ -91,6 +91,8 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "B", "A", "UP", "S", "RUF"]
 ignore = ["S101"]
+# The rules of wemake-python-styleguide, which flake8 runs, may be named in noqa comments
+external = ["WPS"]
 
 [tool.mypy]
 files = ["python", "tests", "scripts", "bench"]

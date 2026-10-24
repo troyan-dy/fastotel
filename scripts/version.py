@@ -30,7 +30,7 @@ def section(changelog: str, version: str) -> str | None:
     The body of the `## [version] - date` section, up to the next section or the links.
     """
     heading = rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}\n"
-    match = re.search(heading + r"(.*?)(?=^## \[|^\[Unreleased\]: )", changelog, re.MULTILINE | re.DOTALL)
+    match = re.search(rf"{heading}(.*?)(?=^## \[|^\[Unreleased\]: )", changelog, re.MULTILINE | re.DOTALL)
     return match.group(1).strip() if match else None
 
 
@@ -56,11 +56,25 @@ def _version_in(pyproject: str) -> str:
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
     # git from PATH with fixed subcommands, run by CI and by `make check-version`
-    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=False)  # noqa: S603, S607
+    command = ["git", *args]
+    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)  # noqa: S603
 
 
 def _tagged(version: str) -> bool:
     return _git("rev-parse", "--quiet", "--verify", f"refs/tags/v{version}").returncode == 0
+
+
+def _check(version: str, base: str, changelog: str) -> list[str]:
+    if _git("cat-file", "-e", f"{base}:pyproject.toml").returncode == 0:
+        shown = _git("show", f"{base}:pyproject.toml")
+        if shown.returncode != 0:
+            reason = shown.stderr.strip()
+            return [f"cannot read pyproject.toml on {base}: {reason}"]
+        base_version = _version_in(shown.stdout)
+    else:
+        # The first release: the base has no package yet
+        base_version = "0.0.0"
+    return problems(version, base_version, changelog, tagged=_tagged(version))
 
 
 def _fail(errors: list[str]) -> int:
@@ -77,15 +91,7 @@ def main(argv: list[str]) -> int:  # pragma: no cover - exercised by CI
 
     match argv:
         case ["check", base]:
-            if _git("cat-file", "-e", f"{base}:pyproject.toml").returncode != 0:
-                # The first release: the base has no package yet
-                base_version = "0.0.0"
-            else:
-                shown = _git("show", f"{base}:pyproject.toml")
-                if shown.returncode != 0:
-                    return _fail([f"cannot read pyproject.toml on {base}: {shown.stderr.strip()}"])
-                base_version = _version_in(shown.stdout)
-            errors = problems(version, base_version, changelog, tagged=_tagged(version))
+            errors = _check(version, base, changelog)
         case ["unreleased"]:
             errors = []
             if _tagged(version):
