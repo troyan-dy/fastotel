@@ -13,6 +13,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Built with PyO3 0.30 and ureq 3.5; the Rust and Python lock files are brought up to the latest releases (ruff
   0.17, hypothesis 6.170). The package's own dependencies and behaviour are unchanged.
 - CI uses setup-uv 10.3.
+- A SessionStart hook sets the repository up in cloud sessions of Claude Code: it installs the Python and Rust
+  dependencies and builds the extension, so the tests and linters run at once. It stays out of the sdist.
 
 ## [0.9.0] - 2026-10-11
 

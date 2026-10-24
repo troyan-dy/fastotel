@@ -66,8 +66,12 @@ build-backend = "maturin"
 [tool.maturin]
 python-source = "python"
 module-name = "fastotel._fastotel"
-# The agent instructions stay out of the sdist
-exclude = [{ path = "CLAUDE.md", format = "sdist" }, { path = "docs/agents/**/*", format = "sdist" }]
+# The agent instructions and the Claude Code settings stay out of the sdist
+exclude = [
+  { path = "CLAUDE.md", format = "sdist" },
+  { path = "docs/agents/**/*", format = "sdist" },
+  { path = ".claude/**/*", format = "sdist" },
+]
 
 [tool.uv]
 # uv rebuilds the extension when the Rust sources change, not only the Python metadata
