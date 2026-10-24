@@ -6,6 +6,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-24
+
+### Changed
+
+- Built with PyO3 0.30 and ureq 3.5; the Rust and Python lock files are brought up to the latest releases (ruff
+  0.17, hypothesis 6.170). The package's own dependencies and behaviour are unchanged.
+
 ## [0.9.0] - 2026-10-11
 
 ### Added
@@ -147,7 +154,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Releases: every version that reaches `master` is published to PyPI through Trusted Publishing, tagged and
   given release notes from this file.
 
-[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/troyan-dy/fastotel/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/troyan-dy/fastotel/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/troyan-dy/fastotel/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/troyan-dy/fastotel/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/troyan-dy/fastotel/compare/v0.6.0...v0.7.0
