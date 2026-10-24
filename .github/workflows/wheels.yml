@@ -30,7 +30,7 @@ jobs:
       PLATFORM: ${{ matrix.platform.python }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the interpreters
         if: matrix.platform.python
         shell: bash

@@ -12,6 +12,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Built with PyO3 0.30 and ureq 3.5; the Rust and Python lock files are brought up to the latest releases (ruff
   0.17, hypothesis 6.170). The package's own dependencies and behaviour are unchanged.
+- CI uses setup-uv 10.3.
 
 ## [0.9.0] - 2026-10-11
 
