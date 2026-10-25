@@ -14,6 +14,7 @@ from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
 from typing import Self
@@ -58,7 +59,7 @@ def _decompress(body: bytes, encoding: str | None) -> bytes:
     return body
 
 
-class _Handler(BaseHTTPRequestHandler):
+class _TracesHandler(BaseHTTPRequestHandler):
     # Keep-alive, as a collector does
     protocol_version = "HTTP/1.1"
     server: "_Server"
@@ -66,10 +67,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         if self.path != TRACES_PATH:
-            self._reply(404)
+            self._reply(HTTPStatus.NOT_FOUND)
             return
         # Recorded before the answer: once an export returns, the test sees what it sent
-        headers = {name.lower(): value for name, value in self.headers.items()}
+        headers = {name.lower(): header_value for name, header_value in self.headers.items()}
         request = ExportTraceServiceRequest.FromString(_decompress(body, headers.get("content-encoding")))
         received = Received(self.path, headers, request, body, self.client_address[1], time.monotonic())
         with self.server.lock:
@@ -79,26 +80,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.server.answering.wait()
         self._reply(reply.status, "application/x-protobuf", reply.headers, reply.body)
 
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - the signature of the base class
+        """
+        Logs nothing: a line per request would land in the test output.
+        """
+
     def _reply(
         self, status: int, content_type: str = "text/plain", headers: dict[str, str] | None = None, body: bytes = b""
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        for name, value in (headers or {}).items():
-            self.send_header(name, value)
+        for name, header_value in (headers or {}).items():
+            self.send_header(name, header_value)
         self.end_headers()
         self.wfile.write(body)
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - the signature of the base class
-        pass
 
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, port: int, tls: ssl.SSLContext | None) -> None:
-        super().__init__(("127.0.0.1", port), _Handler)
+        super().__init__(("127.0.0.1", port), _TracesHandler)
         self.tls = tls
         self.lock = threading.Lock()
         self.received: list[Received] = []
@@ -129,7 +132,7 @@ class _Server(ThreadingHTTPServer):
             super().handle_error(request, client_address)  # type: ignore[arg-type]
 
 
-class FakeReceiver:
+class FakeReceiver:  # noqa: WPS214 - what the tests send, answer and inspect
     """
     Serves on 127.0.0.1 while in its `with` block: on a free port unless given one, over TLS when given a server
     context.
@@ -145,7 +148,8 @@ class FakeReceiver:
         The URL to export spans to, `/v1/traces` included.
         """
         scheme = "http" if self._server.tls is None else "https"
-        return f"{scheme}://127.0.0.1:{self._server.server_address[1]}{TRACES_PATH}"
+        port = self._server.server_address[1]
+        return f"{scheme}://127.0.0.1:{port}{TRACES_PATH}"
 
     def reply(self, *replies: Reply) -> None:
         """
@@ -170,21 +174,22 @@ class FakeReceiver:
         """
         Every span received so far, in the order they arrived.
         """
-        return [
-            span
-            for request in self.requests
-            for resource_spans in request.resource_spans
-            for scope_spans in resource_spans.scope_spans
-            for span in scope_spans.spans
-        ]
+        spans: list[Span] = []
+        for request in self.requests:
+            for resource_spans in request.resource_spans:
+                for scope_spans in resource_spans.scope_spans:
+                    spans.extend(scope_spans.spans)
+        return spans
 
     def wait_for_requests(self, count: int, timeout: float = 10) -> list[ExportTraceServiceRequest]:
         """
         The requests received once there are at least `count`, or all of them after `timeout` seconds.
         """
         deadline = time.monotonic() + timeout
-        while len(requests := self.requests) < count and time.monotonic() < deadline:
+        requests = self.requests
+        while len(requests) < count and time.monotonic() < deadline:
             time.sleep(0.005)
+            requests = self.requests
         return requests
 
     @contextmanager

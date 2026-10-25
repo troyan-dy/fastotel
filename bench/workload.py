@@ -36,8 +36,8 @@ def work() -> int:
     One unit of the CPU-bound workload, about 9 µs of pure Python on an Apple M2 Pro.
     """
     total = 0
-    for i in range(300):
-        total += i * i % 7
+    for index in range(300):  # noqa: WPS519 - the loop is the work, sum() would measure something else
+        total += index * index % 7
     return total
 
 
@@ -58,7 +58,7 @@ class Usage:
         return self.process_cpu - self.workload_cpu
 
 
-def paced(loops: int, tracer: Tracer, rate: int) -> Usage:
+def paced(loops: int, tracer: Tracer, rate: int) -> Usage:  # noqa: WPS210 - the three clocks, read before and after
     """
     Run `loops` units of work and create `rate` spans per second of wall time along the way.
     """

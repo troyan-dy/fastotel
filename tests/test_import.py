@@ -2,13 +2,12 @@ import sys
 import sysconfig
 from importlib.metadata import version
 
-import fastotel
 import pytest
-from fastotel import _fastotel
+from fastotel import __version__, _fastotel
 
 
 def test_version_is_the_installed_one() -> None:
-    assert fastotel.__version__ == version("fastotel")
+    assert __version__ == version("fastotel")
 
 
 def test_native_module_is_loaded() -> None:

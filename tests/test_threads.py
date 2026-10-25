@@ -19,7 +19,9 @@ SPANS = 1000
 TIMEOUT = 120
 
 
-def _run(receiver: FakeReceiver, midway: Callable[[OTLPSpanProcessor], None]) -> tuple[OTLPSpanProcessor, int]:
+def _run(  # noqa: WPS231 - the threads of the test, defined where they share its state
+    receiver: FakeReceiver, midway: Callable[[OTLPSpanProcessor], None]
+) -> tuple[OTLPSpanProcessor, int]:
     """
     Ends SPANS spans on each of EMITTING threads while FLUSHING threads flush in a loop, calls `midway` once
     half the spans have ended, then shuts down; the processor and the spans ended.
@@ -31,7 +33,7 @@ def _run(receiver: FakeReceiver, midway: Callable[[OTLPSpanProcessor], None]) ->
     provider = TracerProvider()
     provider.add_span_processor(processor)
     tracer = provider.get_tracer("app")
-    ended = [0] * EMITTING
+    ended = [0 for _ in range(EMITTING)]
     half = threading.Semaphore(0)
     start = threading.Barrier(EMITTING + FLUSHING + 1)
     emitting = threading.Event()
@@ -39,19 +41,19 @@ def _run(receiver: FakeReceiver, midway: Callable[[OTLPSpanProcessor], None]) ->
     errors: list[BaseException] = []
 
     def emit(index: int) -> None:
-        try:
+        try:  # noqa: WPS229 - whatever the thread raises fails the test
             start.wait(TIMEOUT)
-            for i in range(SPANS):
+            for count in range(SPANS):
                 tracer.start_span("span").end()
                 ended[index] += 1
-                if i == SPANS // 2:
+                if count == SPANS // 2:
                     half.release()
         except BaseException as error:
             errors.append(error)
             half.release()
 
     def flush() -> None:
-        try:
+        try:  # noqa: WPS229 - whatever the thread raises fails the test
             start.wait(TIMEOUT)
             while emitting.is_set():
                 processor.force_flush(10000)

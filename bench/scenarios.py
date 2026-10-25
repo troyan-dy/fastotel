@@ -5,7 +5,8 @@ A scenario takes the base URL of the local OTLP sink and returns a tracer provid
 down. Adding one, such as fastotel's processor (#18), is one more entry in SCENARIOS; the others stay as they are.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from types import MappingProxyType
 from typing import NamedTuple
 
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -49,13 +50,15 @@ def _sdk_discarding(sink: str) -> Setup:
 
 
 def _sdk_otlp_http(sink: str) -> Setup:
-    return _sdk(OTLPSpanExporter(endpoint=sink + TRACES_PATH))
+    return _sdk(OTLPSpanExporter(endpoint=f"{sink}{TRACES_PATH}"))
 
 
-SCENARIOS: dict[str, Scenario] = {
-    "api": Scenario("API, no SDK", _api),
-    "sdk": Scenario("SDK + BatchSpanProcessor, no-op exporter", _sdk_discarding),
-    "sdk-otlp": Scenario("SDK + BatchSpanProcessor + OTLP/HTTP exporter", _sdk_otlp_http),
-}
+SCENARIOS: Mapping[str, Scenario] = MappingProxyType(
+    {
+        "api": Scenario("API, no SDK", _api),
+        "sdk": Scenario("SDK + BatchSpanProcessor, no-op exporter", _sdk_discarding),
+        "sdk-otlp": Scenario("SDK + BatchSpanProcessor + OTLP/HTTP exporter", _sdk_otlp_http),
+    }
+)
 # Tracing off: the costs of the others are measured against it
 BASELINE = "api"

@@ -1,6 +1,6 @@
 [project]
 name = "fastotel"
-version = "0.9.0"
+version = "0.9.1"
 description = "A Rust-backed drop-in for the OpenTelemetry Python SDK that takes tracing overhead off the request path"
 readme = "README.md"
 license = "MIT"
@@ -57,6 +57,8 @@ dev = [
   # from 3.15
   "trustme>=1.2 ; python_full_version < '3.15'",
   "types-protobuf>=5",
+  # make lint: the style rules ruff has not, through flake8; setup.cfg configures it
+  "wemake-python-styleguide>=1.8.1",
 ]
 
 [build-system]
@@ -66,8 +68,12 @@ build-backend = "maturin"
 [tool.maturin]
 python-source = "python"
 module-name = "fastotel._fastotel"
-# The agent instructions stay out of the sdist
-exclude = [{ path = "CLAUDE.md", format = "sdist" }, { path = "docs/agents/**/*", format = "sdist" }]
+# The agent instructions and the Claude Code settings stay out of the sdist
+exclude = [
+  { path = "CLAUDE.md", format = "sdist" },
+  { path = "docs/agents/**/*", format = "sdist" },
+  { path = ".claude/**/*", format = "sdist" },
+]
 
 [tool.uv]
 # uv rebuilds the extension when the Rust sources change, not only the Python metadata
@@ -87,6 +93,8 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "B", "A", "UP", "S", "RUF"]
 ignore = ["S101"]
+# The rules of wemake-python-styleguide, which flake8 runs, may be named in noqa comments
+external = ["WPS"]
 
 [tool.mypy]
 files = ["python", "tests", "scripts", "bench"]

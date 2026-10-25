@@ -9,6 +9,7 @@ import os
 import re
 from collections.abc import Mapping
 from importlib.metadata import version
+from types import MappingProxyType
 from urllib.parse import unquote
 
 OTEL_EXPORTER_OTLP_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
@@ -31,7 +32,9 @@ _TRACES_PATH = "v1/traces"
 _DEFAULT_TIMEOUT = 10
 _COMPRESSIONS = ("none", "deflate", "gzip")
 # Where the reference names itself, fastotel does; the rest are the reference's defaults
-_DEFAULT_HEADERS = {"content-type": "application/x-protobuf", "user-agent": f"fastotel/{version('fastotel')}"}
+_DEFAULT_HEADERS = MappingProxyType(
+    {"content-type": "application/x-protobuf", "user-agent": f"fastotel/{version('fastotel')}"}
+)
 
 logger = logging.getLogger("fastotel")
 
@@ -39,7 +42,8 @@ logger = logging.getLogger("fastotel")
 def endpoint(argument: str | None) -> str:
     if argument:
         return argument
-    if traces := os.environ.get(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT):
+    traces = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
+    if traces:
         return traces
     base = os.environ.get(OTEL_EXPORTER_OTLP_ENDPOINT) or _DEFAULT_ENDPOINT
     return f"{base.removesuffix('/')}/{_TRACES_PATH}"
@@ -54,7 +58,8 @@ def headers(argument: Mapping[str, str] | None) -> dict[str, str]:
         )
     )
     if argument:
-        resolved.update({name.lower(): value for name, value in argument.items()})
+        given = {name.lower(): header_value for name, header_value in argument.items()}
+        resolved.update(given)
     return resolved
 
 
@@ -78,11 +83,12 @@ def compression(argument: object) -> str:
     "none", "deflate" or "gzip": the argument is one of the reference's `Compression` enums or a string.
     """
     if argument:
-        value = getattr(argument, "value", argument)
-        if not isinstance(value, str):
+        given = getattr(argument, "value", argument)
+        if not isinstance(given, str):
             raise TypeError(f"compression must be a str or a Compression, not {type(argument).__name__}")
-        if (name := value.strip().lower()) not in _COMPRESSIONS:
-            raise ValueError(f"Invalid compression type: {value!r}. Expected one of: 'none', 'deflate', 'gzip'.")
+        name = given.strip().lower()
+        if name not in _COMPRESSIONS:
+            raise ValueError(f"Invalid compression type: {given!r}. Expected one of: 'none', 'deflate', 'gzip'.")
         return name
     raw = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_COMPRESSION) or os.environ.get(OTEL_EXPORTER_OTLP_COMPRESSION)
     name = (raw or "none").lower().strip()
@@ -92,8 +98,8 @@ def compression(argument: object) -> str:
     return name
 
 
-def tls_file(argument: str | None, traces_variable: str, variable: str) -> str | None:
-    return argument or os.environ.get(traces_variable) or os.environ.get(variable) or None
+def tls_file(argument: str | None, traces_variable: str, general_variable: str) -> str | None:
+    return argument or os.environ.get(traces_variable) or os.environ.get(general_variable) or None
 
 
 # The header format of the reference, from opentelemetry.util.re (Apache-2.0), which older versions of
@@ -121,12 +127,13 @@ def parse_env_headers(raw: str) -> dict[str, str]:
         if not header:
             continue
         if _HEADER_PATTERN.fullmatch(header.strip()):
-            name, value = header.strip().split("=", 1)
-            parsed[unquote(name).strip().lower()] = unquote(value).strip()
+            name, header_value = header.strip().split("=", 1)
+            name = unquote(name).strip().lower()
+            parsed[name] = unquote(header_value).strip()
         elif _LIBERAL_HEADER_PATTERN.fullmatch(header.strip()):
             # Not URL-encoded, taken as it is, as other languages' SDKs take it
-            name, value = header.strip().split("=", 1)
-            parsed[name.strip().lower()] = value.strip()
+            name, header_value = header.strip().split("=", 1)
+            parsed[name.strip().lower()] = header_value.strip()
         else:
             logger.warning(_INVALID_HEADER, header)
     return parsed

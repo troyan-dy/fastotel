@@ -1,9 +1,10 @@
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
@@ -12,7 +13,7 @@ from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Sp
 from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
 
 from bench import run, table, workload
-from bench.scenarios import BASELINE, SCENARIOS
+from bench.scenarios import BASELINE, SCENARIOS, Setup
 from bench.sink import TRACES_PATH, running_sink, stats
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,13 +25,22 @@ def sink() -> Iterator[str]:
         yield url
 
 
+@contextmanager
+def _scenario(name: str, sink: str) -> Iterator[Setup]:
+    setup = SCENARIOS[name].setup(sink)
+    try:
+        yield setup
+    finally:
+        setup.shutdown()
+
+
 def _post(url: str, body: bytes) -> int:
     headers = {"Content-Type": "application/x-protobuf"}
-    request = urllib.request.Request(url, data=body, headers=headers)  # noqa: S310 - the local sink
+    request = Request(url, data=body, headers=headers)  # noqa: S310 - the local sink
     try:
-        with urllib.request.urlopen(request) as response:  # noqa: S310
+        with urlopen(request) as response:  # noqa: S310
             return int(response.status)
-    except urllib.error.HTTPError as error:
+    except HTTPError as error:
         return error.code
 
 
@@ -39,8 +49,8 @@ def test_sink_accepts_traces_and_counts_the_spans(sink: str) -> None:
     body = ExportTraceServiceRequest(resource_spans=[ResourceSpans(resource=Resource(), scope_spans=[spans])])
     before = stats(sink)
 
-    assert _post(sink + TRACES_PATH, body.SerializeToString()) == 200
-    assert _post(sink + "/v1/metrics", b"") == 404
+    assert _post(f"{sink}{TRACES_PATH}", body.SerializeToString()) == 200
+    assert _post(f"{sink}/v1/metrics", b"") == 404
 
     after = stats(sink)
     assert after["requests"] - before["requests"] == 1
@@ -50,28 +60,22 @@ def test_sink_accepts_traces_and_counts_the_spans(sink: str) -> None:
 
 @pytest.mark.parametrize("name", SCENARIOS)
 def test_scenario_runs_the_hot_path_and_the_workload(name: str, sink: str) -> None:
-    setup = SCENARIOS[name].setup(sink)
-    try:
+    with _scenario(name, sink) as setup:
         tracer = setup.provider.get_tracer("fastotel.bench")
         assert workload.hot_path(100, tracer) > 0
         assert workload.paced(100, tracer, 1_000).seconds > 0
-    finally:
-        setup.shutdown()
 
 
 def test_otlp_scenario_exports_to_the_sink(sink: str) -> None:
-    setup = SCENARIOS["sdk-otlp"].setup(sink)
     before = stats(sink)
-    try:
+    with _scenario("sdk-otlp", sink) as setup:
         workload.hot_path(10, setup.provider.get_tracer("fastotel.bench"))
         assert isinstance(setup.provider, SdkTracerProvider)
         assert setup.provider.force_flush()
-    finally:
-        setup.shutdown()
     assert stats(sink)["spans"] - before["spans"] == 10
 
 
-@pytest.mark.parametrize(("name", "lost"), [("api", None), ("sdk", None), ("sdk-otlp", 0.0)])
+@pytest.mark.parametrize(("name", "lost"), [("api", None), ("sdk", None), ("sdk-otlp", float(0))])
 def test_lost_compares_the_spans_created_with_those_the_sink_received(name: str, lost: float | None, sink: str) -> None:
     # 1k spans/s is far below what the exporter keeps up with; a scenario that sends nothing has no figure
     assert run.lost(name, sink, 1_000, 0.2) == lost
@@ -86,7 +90,7 @@ def test_paced_creates_spans_at_the_rate() -> None:
     assert usage.background_cpu == pytest.approx(usage.process_cpu - usage.workload_cpu)
 
 
-def _row(
+def _row(  # noqa: WPS211 - the fields of a row, those the tests vary
     scenario: str,
     python: str,
     gil: bool,
@@ -94,14 +98,14 @@ def _row(
     cpu: float | None = None,
     lost: dict[int, float | None] | None = None,
 ) -> table.Row:
-    throughput = {rate: table.Measure(value, 0.01) for rate, value in ops.items()}
+    throughput = {rate: table.Measure(ops_per_second, 0.01) for rate, ops_per_second in ops.items()}
     return table.Row(python, gil, scenario, table.Measure(1000.0, 0.02), throughput, cpu, lost or {})
 
 
 def test_table_shows_every_scenario_against_the_baseline() -> None:
     rows = [
         _row("api", "3.14.6", True, {5_000: 100_000.0}),
-        _row("sdk-otlp", "3.14.6", True, {5_000: 90_000.0}, cpu=12.5, lost={5_000: 0.0, 10_000: 0.305}),
+        _row("sdk-otlp", "3.14.6", True, {5_000: 90_000.0}, cpu=12.5, lost={5_000: float(0), 10_000: 0.305}),
     ]
 
     lines = table.render(rows).splitlines()

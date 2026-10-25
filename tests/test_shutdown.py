@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 from fastotel import OTLPSpanProcessor, _fastotel
-from fastotel._fastotel import PanicException
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.sampling import Decision, StaticSampler
 from receiver import FakeReceiver
@@ -41,8 +40,8 @@ def test_force_flush_returns_false_when_the_export_outlasts_the_timeout(receiver
 
 def test_force_flush_exports_what_ended_before_it(receiver: FakeReceiver) -> None:
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, schedule_delay_millis=60000)
-    for i in range(3):
-        processor.on_end(_span(f"span {i}"))
+    for index in range(3):
+        processor.on_end(_span(f"span {index}"))
     assert processor.force_flush()
     assert [span.name for span in receiver.spans()] == ["span 0", "span 1", "span 2"]
     # Nothing queued: no request
@@ -110,8 +109,8 @@ def test_on_end_after_shutdown_reads_nothing_from_the_span(receiver: FakeReceive
 
 def test_shutdown_from_many_threads_at_once_exports_once(receiver: FakeReceiver) -> None:
     processor = OTLPSpanProcessor(endpoint=receiver.endpoint, schedule_delay_millis=60000)
-    for i in range(10):
-        processor.on_end(_span(f"span {i}"))
+    for index in range(10):
+        processor.on_end(_span(f"span {index}"))
     with ThreadPoolExecutor(8) as pool:
         list(pool.map(lambda _: processor.shutdown(), range(8)))
     assert len(receiver.spans()) == 10
@@ -134,7 +133,7 @@ class _Panicking:
 
     @property
     def context(self) -> Any:
-        raise PanicException("a bug in the copy")
+        raise _fastotel.PanicException("a bug in the copy")
 
 
 def test_a_panic_in_on_end_is_caught_logged_and_counted(

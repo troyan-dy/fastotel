@@ -5,46 +5,50 @@ values. Only the SDK is needed, so the lowest job of CI can send them too.
 """
 
 import math
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
-from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan, SpanLimits, SpanProcessor, TracerProvider
 from opentelemetry.trace import Link, NonRecordingSpan, SpanContext, SpanKind, Status, StatusCode, TraceFlags, Tracer
+from opentelemetry.trace.propagation import set_span_in_context
 from opentelemetry.trace.span import TraceState
 
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 
 # Values of every type the SDK keeps, at the edges where encoders tend to differ
-ATTRIBUTES: dict[str, Any] = {
-    "bool": True,
-    "false": False,
-    "int": 42,
-    "int.min": INT64_MIN,
-    "int.max": INT64_MAX,
-    "zero": 0,
-    "float": 0.25,
-    "float.negative.zero": -0.0,
-    "nan": math.nan,
-    "inf": math.inf,
-    "-inf": -math.inf,
-    "str": "value",
-    "str.empty": "",
-    "str.non-ascii": "Grüße, 世界 🌍",
-    "bools": (True, False),
-    "ints": (1, INT64_MIN, INT64_MAX),
-    "floats": (1.5, math.nan, -math.inf),
-    "strs": ("a", "", "é"),
-    "empty": (),
-    # The extended attributes of newer SDKs; older ones drop them when the span sets them
-    "none": None,
-    "bytes": b"\x00\xff",
-    "mixed": (1, "two", 3.0, None, True),
-    "nested": ((1, 2), ("a",), ()),
-    "mapping": {"key": "value", "inner": {"deep": (1, 2)}, "empty": {}},
-    "ключ": "значение",
-}
+ATTRIBUTES: Mapping[str, Any] = MappingProxyType(
+    {
+        "bool": True,
+        "false": False,
+        "int": 42,
+        "int.min": INT64_MIN,
+        "int.max": INT64_MAX,
+        "zero": 0,
+        "float": 0.25,
+        "float.negative.zero": -float(0),
+        "nan": math.nan,
+        "inf": math.inf,
+        "-inf": -math.inf,
+        "str": "value",
+        "str.empty": "",
+        "str.non-ascii": "Grüße, 世界 🌍",
+        "bools": (True, False),
+        "ints": (1, INT64_MIN, INT64_MAX),
+        "floats": (1.5, math.nan, -math.inf),
+        "strs": ("a", "", "é"),
+        "empty": (),
+        # The extended attributes of newer SDKs; older ones drop them when the span sets them
+        "none": None,
+        "bytes": b"\x00\xff",
+        "mixed": (1, "two", 3.0, None, True),
+        "nested": ((1, 2), ("a",), ()),
+        "mapping": {"key": "value", "inner": {"deep": (1, 2)}, "empty": {}},
+        "ключ": "значение",
+    }
+)
 
 SAMPLED = TraceFlags(TraceFlags.SAMPLED)
 REMOTE_PARENT = SpanContext(
@@ -105,7 +109,7 @@ def end_every_kind_of_span(*processors: SpanProcessor) -> int:
         ended += 3
 
     # A remote parent: the flags say so, and the trace state comes from it
-    remote = trace.set_span_in_context(NonRecordingSpan(REMOTE_PARENT))
+    remote = set_span_in_context(NonRecordingSpan(REMOTE_PARENT))
     app.start_span("consume", context=remote, kind=SpanKind.CONSUMER).end()
     app.start_span("publish", kind=SpanKind.PRODUCER).end()
     ended += 2
